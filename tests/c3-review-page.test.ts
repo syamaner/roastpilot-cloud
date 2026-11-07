@@ -84,3 +84,564 @@ it("ROW-4 maps every nullable slider as numeric or explicit null", () => {
   for (const field of ["aroma", "acidity", "sweetness", "body", "aftertaste"] as const) expect(nullable[0][field]).toBeNull();
   expect(serializePage(slug, nullable, null)).toBe('{"api_version":1,"public_slug":"' + slug + '","reviews":[{"paging_key":"' + key(100) + '","reviewer_name":"taster","score":4,"aroma":null,"acidity":null,"sweetness":null,"body":null,"aftertaste":null,"brew_method":"filter","notes":"null sliders","created_at":"2026-11-06T12:00:00.000000001+00:00"}],"next_cursor":null}');
 });
+
+const independentSliderCases = [
+  {
+    "name": "aroma alone",
+    "cells": [
+      "matrix",
+      "4",
+      "11",
+      null,
+      null,
+      null,
+      null,
+      "filter",
+      "independent sliders",
+      "2026-11-06T12:00:00.000000001+00:00",
+      "v1-0000000000000000000000000000000000000000000000000000000000000064",
+      "100",
+      "1",
+      "0"
+    ],
+    "expected": {
+      "aroma": 11,
+      "acidity": null,
+      "sweetness": null,
+      "body": null,
+      "aftertaste": null
+    },
+    "types": {
+      "aroma": "number",
+      "acidity": "object",
+      "sweetness": "object",
+      "body": "object",
+      "aftertaste": "object"
+    },
+    "body": "{\"api_version\":1,\"public_slug\":\"123456789ABCDEFGHJKLM\",\"reviews\":[{\"paging_key\":\"v1-0000000000000000000000000000000000000000000000000000000000000064\",\"reviewer_name\":\"matrix\",\"score\":4,\"aroma\":11,\"acidity\":null,\"sweetness\":null,\"body\":null,\"aftertaste\":null,\"brew_method\":\"filter\",\"notes\":\"independent sliders\",\"created_at\":\"2026-11-06T12:00:00.000000001+00:00\"}],\"next_cursor\":null}"
+  },
+  {
+    "name": "acidity alone",
+    "cells": [
+      "matrix",
+      "4",
+      null,
+      "22",
+      null,
+      null,
+      null,
+      "filter",
+      "independent sliders",
+      "2026-11-06T12:00:00.000000001+00:00",
+      "v1-0000000000000000000000000000000000000000000000000000000000000064",
+      "100",
+      "1",
+      "0"
+    ],
+    "expected": {
+      "aroma": null,
+      "acidity": 22,
+      "sweetness": null,
+      "body": null,
+      "aftertaste": null
+    },
+    "types": {
+      "aroma": "object",
+      "acidity": "number",
+      "sweetness": "object",
+      "body": "object",
+      "aftertaste": "object"
+    },
+    "body": "{\"api_version\":1,\"public_slug\":\"123456789ABCDEFGHJKLM\",\"reviews\":[{\"paging_key\":\"v1-0000000000000000000000000000000000000000000000000000000000000064\",\"reviewer_name\":\"matrix\",\"score\":4,\"aroma\":null,\"acidity\":22,\"sweetness\":null,\"body\":null,\"aftertaste\":null,\"brew_method\":\"filter\",\"notes\":\"independent sliders\",\"created_at\":\"2026-11-06T12:00:00.000000001+00:00\"}],\"next_cursor\":null}"
+  },
+  {
+    "name": "sweetness alone",
+    "cells": [
+      "matrix",
+      "4",
+      null,
+      null,
+      "33",
+      null,
+      null,
+      "filter",
+      "independent sliders",
+      "2026-11-06T12:00:00.000000001+00:00",
+      "v1-0000000000000000000000000000000000000000000000000000000000000064",
+      "100",
+      "1",
+      "0"
+    ],
+    "expected": {
+      "aroma": null,
+      "acidity": null,
+      "sweetness": 33,
+      "body": null,
+      "aftertaste": null
+    },
+    "types": {
+      "aroma": "object",
+      "acidity": "object",
+      "sweetness": "number",
+      "body": "object",
+      "aftertaste": "object"
+    },
+    "body": "{\"api_version\":1,\"public_slug\":\"123456789ABCDEFGHJKLM\",\"reviews\":[{\"paging_key\":\"v1-0000000000000000000000000000000000000000000000000000000000000064\",\"reviewer_name\":\"matrix\",\"score\":4,\"aroma\":null,\"acidity\":null,\"sweetness\":33,\"body\":null,\"aftertaste\":null,\"brew_method\":\"filter\",\"notes\":\"independent sliders\",\"created_at\":\"2026-11-06T12:00:00.000000001+00:00\"}],\"next_cursor\":null}"
+  },
+  {
+    "name": "body alone",
+    "cells": [
+      "matrix",
+      "4",
+      null,
+      null,
+      null,
+      "44",
+      null,
+      "filter",
+      "independent sliders",
+      "2026-11-06T12:00:00.000000001+00:00",
+      "v1-0000000000000000000000000000000000000000000000000000000000000064",
+      "100",
+      "1",
+      "0"
+    ],
+    "expected": {
+      "aroma": null,
+      "acidity": null,
+      "sweetness": null,
+      "body": 44,
+      "aftertaste": null
+    },
+    "types": {
+      "aroma": "object",
+      "acidity": "object",
+      "sweetness": "object",
+      "body": "number",
+      "aftertaste": "object"
+    },
+    "body": "{\"api_version\":1,\"public_slug\":\"123456789ABCDEFGHJKLM\",\"reviews\":[{\"paging_key\":\"v1-0000000000000000000000000000000000000000000000000000000000000064\",\"reviewer_name\":\"matrix\",\"score\":4,\"aroma\":null,\"acidity\":null,\"sweetness\":null,\"body\":44,\"aftertaste\":null,\"brew_method\":\"filter\",\"notes\":\"independent sliders\",\"created_at\":\"2026-11-06T12:00:00.000000001+00:00\"}],\"next_cursor\":null}"
+  },
+  {
+    "name": "aftertaste alone",
+    "cells": [
+      "matrix",
+      "4",
+      null,
+      null,
+      null,
+      null,
+      "55",
+      "filter",
+      "independent sliders",
+      "2026-11-06T12:00:00.000000001+00:00",
+      "v1-0000000000000000000000000000000000000000000000000000000000000064",
+      "100",
+      "1",
+      "0"
+    ],
+    "expected": {
+      "aroma": null,
+      "acidity": null,
+      "sweetness": null,
+      "body": null,
+      "aftertaste": 55
+    },
+    "types": {
+      "aroma": "object",
+      "acidity": "object",
+      "sweetness": "object",
+      "body": "object",
+      "aftertaste": "number"
+    },
+    "body": "{\"api_version\":1,\"public_slug\":\"123456789ABCDEFGHJKLM\",\"reviews\":[{\"paging_key\":\"v1-0000000000000000000000000000000000000000000000000000000000000064\",\"reviewer_name\":\"matrix\",\"score\":4,\"aroma\":null,\"acidity\":null,\"sweetness\":null,\"body\":null,\"aftertaste\":55,\"brew_method\":\"filter\",\"notes\":\"independent sliders\",\"created_at\":\"2026-11-06T12:00:00.000000001+00:00\"}],\"next_cursor\":null}"
+  },
+  {
+    "name": "aroma null",
+    "cells": [
+      "matrix",
+      "4",
+      null,
+      "22",
+      "33",
+      "44",
+      "55",
+      "filter",
+      "independent sliders",
+      "2026-11-06T12:00:00.000000001+00:00",
+      "v1-0000000000000000000000000000000000000000000000000000000000000064",
+      "100",
+      "1",
+      "0"
+    ],
+    "expected": {
+      "aroma": null,
+      "acidity": 22,
+      "sweetness": 33,
+      "body": 44,
+      "aftertaste": 55
+    },
+    "types": {
+      "aroma": "object",
+      "acidity": "number",
+      "sweetness": "number",
+      "body": "number",
+      "aftertaste": "number"
+    },
+    "body": "{\"api_version\":1,\"public_slug\":\"123456789ABCDEFGHJKLM\",\"reviews\":[{\"paging_key\":\"v1-0000000000000000000000000000000000000000000000000000000000000064\",\"reviewer_name\":\"matrix\",\"score\":4,\"aroma\":null,\"acidity\":22,\"sweetness\":33,\"body\":44,\"aftertaste\":55,\"brew_method\":\"filter\",\"notes\":\"independent sliders\",\"created_at\":\"2026-11-06T12:00:00.000000001+00:00\"}],\"next_cursor\":null}"
+  },
+  {
+    "name": "acidity null",
+    "cells": [
+      "matrix",
+      "4",
+      "11",
+      null,
+      "33",
+      "44",
+      "55",
+      "filter",
+      "independent sliders",
+      "2026-11-06T12:00:00.000000001+00:00",
+      "v1-0000000000000000000000000000000000000000000000000000000000000064",
+      "100",
+      "1",
+      "0"
+    ],
+    "expected": {
+      "aroma": 11,
+      "acidity": null,
+      "sweetness": 33,
+      "body": 44,
+      "aftertaste": 55
+    },
+    "types": {
+      "aroma": "number",
+      "acidity": "object",
+      "sweetness": "number",
+      "body": "number",
+      "aftertaste": "number"
+    },
+    "body": "{\"api_version\":1,\"public_slug\":\"123456789ABCDEFGHJKLM\",\"reviews\":[{\"paging_key\":\"v1-0000000000000000000000000000000000000000000000000000000000000064\",\"reviewer_name\":\"matrix\",\"score\":4,\"aroma\":11,\"acidity\":null,\"sweetness\":33,\"body\":44,\"aftertaste\":55,\"brew_method\":\"filter\",\"notes\":\"independent sliders\",\"created_at\":\"2026-11-06T12:00:00.000000001+00:00\"}],\"next_cursor\":null}"
+  },
+  {
+    "name": "sweetness null",
+    "cells": [
+      "matrix",
+      "4",
+      "11",
+      "22",
+      null,
+      "44",
+      "55",
+      "filter",
+      "independent sliders",
+      "2026-11-06T12:00:00.000000001+00:00",
+      "v1-0000000000000000000000000000000000000000000000000000000000000064",
+      "100",
+      "1",
+      "0"
+    ],
+    "expected": {
+      "aroma": 11,
+      "acidity": 22,
+      "sweetness": null,
+      "body": 44,
+      "aftertaste": 55
+    },
+    "types": {
+      "aroma": "number",
+      "acidity": "number",
+      "sweetness": "object",
+      "body": "number",
+      "aftertaste": "number"
+    },
+    "body": "{\"api_version\":1,\"public_slug\":\"123456789ABCDEFGHJKLM\",\"reviews\":[{\"paging_key\":\"v1-0000000000000000000000000000000000000000000000000000000000000064\",\"reviewer_name\":\"matrix\",\"score\":4,\"aroma\":11,\"acidity\":22,\"sweetness\":null,\"body\":44,\"aftertaste\":55,\"brew_method\":\"filter\",\"notes\":\"independent sliders\",\"created_at\":\"2026-11-06T12:00:00.000000001+00:00\"}],\"next_cursor\":null}"
+  },
+  {
+    "name": "body null",
+    "cells": [
+      "matrix",
+      "4",
+      "11",
+      "22",
+      "33",
+      null,
+      "55",
+      "filter",
+      "independent sliders",
+      "2026-11-06T12:00:00.000000001+00:00",
+      "v1-0000000000000000000000000000000000000000000000000000000000000064",
+      "100",
+      "1",
+      "0"
+    ],
+    "expected": {
+      "aroma": 11,
+      "acidity": 22,
+      "sweetness": 33,
+      "body": null,
+      "aftertaste": 55
+    },
+    "types": {
+      "aroma": "number",
+      "acidity": "number",
+      "sweetness": "number",
+      "body": "object",
+      "aftertaste": "number"
+    },
+    "body": "{\"api_version\":1,\"public_slug\":\"123456789ABCDEFGHJKLM\",\"reviews\":[{\"paging_key\":\"v1-0000000000000000000000000000000000000000000000000000000000000064\",\"reviewer_name\":\"matrix\",\"score\":4,\"aroma\":11,\"acidity\":22,\"sweetness\":33,\"body\":null,\"aftertaste\":55,\"brew_method\":\"filter\",\"notes\":\"independent sliders\",\"created_at\":\"2026-11-06T12:00:00.000000001+00:00\"}],\"next_cursor\":null}"
+  },
+  {
+    "name": "aftertaste null",
+    "cells": [
+      "matrix",
+      "4",
+      "11",
+      "22",
+      "33",
+      "44",
+      null,
+      "filter",
+      "independent sliders",
+      "2026-11-06T12:00:00.000000001+00:00",
+      "v1-0000000000000000000000000000000000000000000000000000000000000064",
+      "100",
+      "1",
+      "0"
+    ],
+    "expected": {
+      "aroma": 11,
+      "acidity": 22,
+      "sweetness": 33,
+      "body": 44,
+      "aftertaste": null
+    },
+    "types": {
+      "aroma": "number",
+      "acidity": "number",
+      "sweetness": "number",
+      "body": "number",
+      "aftertaste": "object"
+    },
+    "body": "{\"api_version\":1,\"public_slug\":\"123456789ABCDEFGHJKLM\",\"reviews\":[{\"paging_key\":\"v1-0000000000000000000000000000000000000000000000000000000000000064\",\"reviewer_name\":\"matrix\",\"score\":4,\"aroma\":11,\"acidity\":22,\"sweetness\":33,\"body\":44,\"aftertaste\":null,\"brew_method\":\"filter\",\"notes\":\"independent sliders\",\"created_at\":\"2026-11-06T12:00:00.000000001+00:00\"}],\"next_cursor\":null}"
+  },
+  {
+    "name": "aroma zero",
+    "cells": [
+      "matrix",
+      "4",
+      "0",
+      "22",
+      "33",
+      "44",
+      "55",
+      "filter",
+      "independent sliders",
+      "2026-11-06T12:00:00.000000001+00:00",
+      "v1-0000000000000000000000000000000000000000000000000000000000000064",
+      "100",
+      "1",
+      "0"
+    ],
+    "expected": {
+      "aroma": 0,
+      "acidity": 22,
+      "sweetness": 33,
+      "body": 44,
+      "aftertaste": 55
+    },
+    "types": {
+      "aroma": "number",
+      "acidity": "number",
+      "sweetness": "number",
+      "body": "number",
+      "aftertaste": "number"
+    },
+    "body": "{\"api_version\":1,\"public_slug\":\"123456789ABCDEFGHJKLM\",\"reviews\":[{\"paging_key\":\"v1-0000000000000000000000000000000000000000000000000000000000000064\",\"reviewer_name\":\"matrix\",\"score\":4,\"aroma\":0,\"acidity\":22,\"sweetness\":33,\"body\":44,\"aftertaste\":55,\"brew_method\":\"filter\",\"notes\":\"independent sliders\",\"created_at\":\"2026-11-06T12:00:00.000000001+00:00\"}],\"next_cursor\":null}"
+  },
+  {
+    "name": "acidity zero",
+    "cells": [
+      "matrix",
+      "4",
+      "11",
+      "0",
+      "33",
+      "44",
+      "55",
+      "filter",
+      "independent sliders",
+      "2026-11-06T12:00:00.000000001+00:00",
+      "v1-0000000000000000000000000000000000000000000000000000000000000064",
+      "100",
+      "1",
+      "0"
+    ],
+    "expected": {
+      "aroma": 11,
+      "acidity": 0,
+      "sweetness": 33,
+      "body": 44,
+      "aftertaste": 55
+    },
+    "types": {
+      "aroma": "number",
+      "acidity": "number",
+      "sweetness": "number",
+      "body": "number",
+      "aftertaste": "number"
+    },
+    "body": "{\"api_version\":1,\"public_slug\":\"123456789ABCDEFGHJKLM\",\"reviews\":[{\"paging_key\":\"v1-0000000000000000000000000000000000000000000000000000000000000064\",\"reviewer_name\":\"matrix\",\"score\":4,\"aroma\":11,\"acidity\":0,\"sweetness\":33,\"body\":44,\"aftertaste\":55,\"brew_method\":\"filter\",\"notes\":\"independent sliders\",\"created_at\":\"2026-11-06T12:00:00.000000001+00:00\"}],\"next_cursor\":null}"
+  },
+  {
+    "name": "sweetness zero",
+    "cells": [
+      "matrix",
+      "4",
+      "11",
+      "22",
+      "0",
+      "44",
+      "55",
+      "filter",
+      "independent sliders",
+      "2026-11-06T12:00:00.000000001+00:00",
+      "v1-0000000000000000000000000000000000000000000000000000000000000064",
+      "100",
+      "1",
+      "0"
+    ],
+    "expected": {
+      "aroma": 11,
+      "acidity": 22,
+      "sweetness": 0,
+      "body": 44,
+      "aftertaste": 55
+    },
+    "types": {
+      "aroma": "number",
+      "acidity": "number",
+      "sweetness": "number",
+      "body": "number",
+      "aftertaste": "number"
+    },
+    "body": "{\"api_version\":1,\"public_slug\":\"123456789ABCDEFGHJKLM\",\"reviews\":[{\"paging_key\":\"v1-0000000000000000000000000000000000000000000000000000000000000064\",\"reviewer_name\":\"matrix\",\"score\":4,\"aroma\":11,\"acidity\":22,\"sweetness\":0,\"body\":44,\"aftertaste\":55,\"brew_method\":\"filter\",\"notes\":\"independent sliders\",\"created_at\":\"2026-11-06T12:00:00.000000001+00:00\"}],\"next_cursor\":null}"
+  },
+  {
+    "name": "body zero",
+    "cells": [
+      "matrix",
+      "4",
+      "11",
+      "22",
+      "33",
+      "0",
+      "55",
+      "filter",
+      "independent sliders",
+      "2026-11-06T12:00:00.000000001+00:00",
+      "v1-0000000000000000000000000000000000000000000000000000000000000064",
+      "100",
+      "1",
+      "0"
+    ],
+    "expected": {
+      "aroma": 11,
+      "acidity": 22,
+      "sweetness": 33,
+      "body": 0,
+      "aftertaste": 55
+    },
+    "types": {
+      "aroma": "number",
+      "acidity": "number",
+      "sweetness": "number",
+      "body": "number",
+      "aftertaste": "number"
+    },
+    "body": "{\"api_version\":1,\"public_slug\":\"123456789ABCDEFGHJKLM\",\"reviews\":[{\"paging_key\":\"v1-0000000000000000000000000000000000000000000000000000000000000064\",\"reviewer_name\":\"matrix\",\"score\":4,\"aroma\":11,\"acidity\":22,\"sweetness\":33,\"body\":0,\"aftertaste\":55,\"brew_method\":\"filter\",\"notes\":\"independent sliders\",\"created_at\":\"2026-11-06T12:00:00.000000001+00:00\"}],\"next_cursor\":null}"
+  },
+  {
+    "name": "aftertaste zero",
+    "cells": [
+      "matrix",
+      "4",
+      "11",
+      "22",
+      "33",
+      "44",
+      "0",
+      "filter",
+      "independent sliders",
+      "2026-11-06T12:00:00.000000001+00:00",
+      "v1-0000000000000000000000000000000000000000000000000000000000000064",
+      "100",
+      "1",
+      "0"
+    ],
+    "expected": {
+      "aroma": 11,
+      "acidity": 22,
+      "sweetness": 33,
+      "body": 44,
+      "aftertaste": 0
+    },
+    "types": {
+      "aroma": "number",
+      "acidity": "number",
+      "sweetness": "number",
+      "body": "number",
+      "aftertaste": "number"
+    },
+    "body": "{\"api_version\":1,\"public_slug\":\"123456789ABCDEFGHJKLM\",\"reviews\":[{\"paging_key\":\"v1-0000000000000000000000000000000000000000000000000000000000000064\",\"reviewer_name\":\"matrix\",\"score\":4,\"aroma\":11,\"acidity\":22,\"sweetness\":33,\"body\":44,\"aftertaste\":0,\"brew_method\":\"filter\",\"notes\":\"independent sliders\",\"created_at\":\"2026-11-06T12:00:00.000000001+00:00\"}],\"next_cursor\":null}"
+  },
+  {
+    "name": "finite fractions",
+    "cells": [
+      "matrix",
+      "4",
+      "11.125",
+      "22.25",
+      "33.5",
+      "44.75",
+      "55.875",
+      "filter",
+      "independent sliders",
+      "2026-11-06T12:00:00.000000001+00:00",
+      "v1-0000000000000000000000000000000000000000000000000000000000000064",
+      "100",
+      "1",
+      "0"
+    ],
+    "expected": {
+      "aroma": 11.125,
+      "acidity": 22.25,
+      "sweetness": 33.5,
+      "body": 44.75,
+      "aftertaste": 55.875
+    },
+    "types": {
+      "aroma": "number",
+      "acidity": "number",
+      "sweetness": "number",
+      "body": "number",
+      "aftertaste": "number"
+    },
+    "body": "{\"api_version\":1,\"public_slug\":\"123456789ABCDEFGHJKLM\",\"reviews\":[{\"paging_key\":\"v1-0000000000000000000000000000000000000000000000000000000000000064\",\"reviewer_name\":\"matrix\",\"score\":4,\"aroma\":11.125,\"acidity\":22.25,\"sweetness\":33.5,\"body\":44.75,\"aftertaste\":55.875,\"brew_method\":\"filter\",\"notes\":\"independent sliders\",\"created_at\":\"2026-11-06T12:00:00.000000001+00:00\"}],\"next_cursor\":null}"
+  }
+];
+it.each(independentSliderCases)("ROW-5 independent nullable sliders $name", ({ cells, expected, types, body }) => {
+  const parsed = parsePage(page([cells]))!;
+  expect(parsed).toEqual([{
+    reviewer_name: "matrix", score: 4, ...expected,
+    brew_method: "filter", notes: "independent sliders",
+    created_at: "2026-11-06T12:00:00.000000001+00:00",
+    paging_key: "v1-0000000000000000000000000000000000000000000000000000000000000064",
+    orderNs: BigInt("100"), multiplicity: BigInt("1"), nullKeys: BigInt("0"),
+  }]);
+  expect({ aroma: typeof parsed[0].aroma, acidity: typeof parsed[0].acidity,
+    sweetness: typeof parsed[0].sweetness, body: typeof parsed[0].body,
+    aftertaste: typeof parsed[0].aftertaste }).toEqual(types);
+  expect(serializePage(slug, parsed, null)).toBe(body);
+});
