@@ -34,6 +34,7 @@ describe("C3 pure page protocol", () => {
   it("DEC-1 hidden roast with anomalies is 404", () => {
     expect(decision([row()], state("0", "0", "1", "2"))).toEqual({ kind: "error", status: 404, error: "not_found" });
     expect(decision([row()], state("2"))).toEqual(error("schema"));
+    expect(decideReviewPage({ columns: [], rows: [["malformed"]], rowCount: 9 }, state("0", "0"), null, slug)).toEqual({ kind: "error", status: 404, error: "not_found" });
     expect(decision([row()], state(""))).toEqual(error("schema"));
   });
   it("DEC-2 null key is identity", () => { const r = row(); r[10] = null; expect(decision([r])).toEqual(error("identity")); expect(decision([row()], state("1", "100", "1"))).toEqual(error("identity")); const n = row(); n[13] = "1"; expect(decision([n])).toEqual(error("identity")); });
@@ -44,7 +45,7 @@ describe("C3 pure page protocol", () => {
   it("DEC-7 51 rows returns 50 and row50 cursor", () => { const d = decision(Array.from({ length: 51 }, (_, i) => row(100 - i))); expect(d.kind).toBe("page"); if (d.kind === "page") { expect(d.reviews).toHaveLength(50); expect(parseCursor(d.nextCursor!, slug)).toEqual({ orderNs: BigInt("51"), pagingKey: key(51) }); } });
   it("DEC-8 more than 51 rows is schema", () => { expect(decision(Array.from({ length: 52 }, (_, i) => row(100 - i)))).toEqual(error("schema")); });
   it("DEC-9 smaller review count is changed", () => { expect(decision([row(), row(99)], state("1", "1"))).toEqual(error("changed")); });
-  it("DEC-10 ties descend by key", () => { const d = decision([row(3, 10), row(2, 10)], state(), { orderNs: BigInt("10"), pagingKey: key(4) }); expect(d.kind).toBe("page"); expect(decision([row(4, 10)], state(), { orderNs: BigInt("10"), pagingKey: key(4) })).toEqual(error("order")); });
+  it("DEC-10 ties descend by key", () => { const d = decision([row(3, 10), row(2, 10)], state(), { orderNs: BigInt("10"), pagingKey: key(4) }); expect(d).toEqual({ kind: "page", reviews: [3, 2].map((n) => ({ reviewer_name: null, score: 4, aroma: null, acidity: 20, sweetness: null, body: null, aftertaste: null, brew_method: null, notes: "public review", created_at: "2026-11-06T12:00:00.000000001+00:00", paging_key: key(n), orderNs: BigInt("10"), multiplicity: BigInt("1"), nullKeys: BigInt("0") })), nextCursor: null }); expect(decision([row(4, 10)], state(), { orderNs: BigInt("10"), pagingKey: key(4) })).toEqual(error("order")); });
   it("INM-1 exact match", () => { expect(matchesIfNoneMatch(parseIfNoneMatch('"abc"'), 'W/"abc"')).toBe(true); });
   it("INM-2 weak tag matches strong-written current", () => { expect(matchesIfNoneMatch(parseIfNoneMatch('W/"abc"'), '"abc"')).toBe(true); expect(matchesIfNoneMatch(parseIfNoneMatch('"abc"'), 'W/"abc"')).toBe(true); });
   it("INM-3 comma inside quoted tag", () => { expect(parseIfNoneMatch('"a,b", W/"c"')).toEqual(["a,b", "c"]); });
@@ -60,4 +61,13 @@ describe("C3 pure page protocol", () => {
     expect(serializePage(slug, [r], null)).toBe('{"api_version":1,"public_slug":"' + slug + '","reviews":[{"paging_key":"' + key(100) + '","reviewer_name":null,"score":4,"aroma":null,"acidity":20,"sweetness":null,"body":null,"aftertaste":null,"brew_method":null,"notes":"public review","created_at":"2026-11-06T12:00:00.000000001+00:00"}],"next_cursor":null}');
     expect(await jsonFailure(503, "incomplete", "identity").text()).toBe('{"error":"incomplete","reason":"identity"}');
   });
+});
+
+it("STATE-PARSE-3 rejects wrong columns and row cardinality", () => {
+  const valid = state();
+  const wrongOrder = [...valid.columns]; [wrongOrder[0], wrongOrder[1]] = [wrongOrder[1], wrongOrder[0]];
+  const wrongName = [{ name: "wrong" }, ...valid.columns.slice(1)];
+  for (const columns of [wrongOrder, wrongName]) expect(parseState({ ...valid, columns })).toBeNull();
+  expect(parseState({ ...valid, rows: [valid.rows[0], valid.rows[0]], rowCount: 2 })).toBeNull();
+  expect(parseState({ ...valid, rowCount: 2 })).toBeNull();
 });

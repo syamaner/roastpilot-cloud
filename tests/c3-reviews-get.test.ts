@@ -1,9 +1,23 @@
+import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { reviewsGet } from "../lib/c3/reviews-get";
 import type { ReviewPageReader } from "../lib/c3/reviews-get";
 import type { Cursor, PageResult } from "../lib/c3/review-page";
 import { encodeCursor } from "../lib/c3/review-page";
 import { SqlApiError } from "../lib/sqlapi";
+const compositionEffects = vi.hoisted(() => ({ executeStatement: vi.fn(), revalidatePath: vi.fn(), verifyWriteRequest: vi.fn(), checkRateLimit: vi.fn(), submitReview: vi.fn() }));
+vi.mock("../lib/sqlapi", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/sqlapi")>();
+  return { ...actual, executeStatement: compositionEffects.executeStatement };
+});
+vi.mock("next/cache", () => ({ revalidatePath: compositionEffects.revalidatePath }));
+vi.mock("../lib/botid", () => ({ verifyWriteRequest: compositionEffects.verifyWriteRequest }));
+vi.mock("../lib/ratelimit", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/ratelimit")>();
+  return { ...actual, checkRateLimit: compositionEffects.checkRateLimit };
+});
+vi.mock("../lib/review-submit", () => ({ submitReview: compositionEffects.submitReview }));
+
 const slug = "123456789ABCDEFGHJKLM"; const secret = "rpc3_" + Buffer.alloc(32, 1).toString("base64url");
 const cols = ["reviewer_name", "score", "aroma", "acidity", "sweetness", "body", "aftertaste", "brew_method", "notes", "created_at", "paging_key", "order_ns", "key_multiplicity", "null_key_count"];
 const key = (n: number) => "v1-" + n.toString(16).padStart(64, "0");
@@ -60,3 +74,104 @@ it("GET-TRAV-2 concurrent newer insert is not collected", async () => { const m 
 it("GET-TRAV-3 concurrent older insert collected once", async () => { const m = model(); const keys = await traverse(m.reader, () => m.add(row(999, -1))); expect(keys).toHaveLength(121); expect(new Set(keys).size).toBe(121); expect(keys.at(-1)).toBe(key(999)); });
 it("GET-TRAV-4 missing anchor non-empty tail continues", async () => { const m = model(); const keys = await traverse(m.reader, (c) => m.remove("v1-" + c.split(".")[2])); expect(keys).toHaveLength(120); expect(new Set(keys).size).toBe(120); });
 it("GET-TRAV-5 missing anchor empty tail restarts", async () => { const m = model(1); const c: Cursor = { orderNs: BigInt("0"), pagingKey: key(1) }; m.remove(key(1)); const r = await reviewsGet(req("?cursor=" + encodeCursor(c, slug)), slug, m.reader, () => secret); expect(r.status).toBe(409); expect(await r.text()).toBe('{"error":"restart_required"}'); });
+
+// Literal O-SQL/O-BODY/O-ETAG oracles, independent of production builders.
+const composedInner = `select reviewer_name,score,aroma,acidity,sweetness,body,aftertaste,brew_method,notes,to_varchar(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.FF9TZH:TZM') as created_at_iso,paging_key,date_part(epoch_nanosecond, created_at) as order_ns,count(*) over (partition by paging_key) as key_multiplicity,coalesce(count_if(paging_key is null) over (), 0) as null_key_count from app.reviews_by_roast where public_slug = :1`;
+const composedFirst = `select reviewer_name,score,aroma,acidity,sweetness,body,aftertaste,brew_method,notes,created_at_iso as created_at,paging_key,order_ns,key_multiplicity,null_key_count from (${composedInner}) order by order_ns desc, paging_key desc limit 51`;
+const composedState = "select (select count(*) from app.roast_by_slug where public_slug = :1) as roast_rows, count(*) as review_rows, coalesce(count_if(paging_key is null), 0) as null_key_rows, count(paging_key) - count(distinct paging_key) as duplicate_key_rows from app.reviews_by_roast where public_slug = :2";
+const literalBody = '{"api_version":1,"public_slug":"' + slug + '","reviews":[{"paging_key":"' + key(100) + '","reviewer_name":null,"score":4,"aroma":null,"acidity":null,"sweetness":null,"body":null,"aftertaste":null,"brew_method":null,"notes":"PUBLIC TEXT","created_at":"2026-11-06T12:00:00.000000001+00:00"}],"next_cursor":null}';
+const literalETag = 'W/"' + createHash("sha256").update("roastpilot/c9-c3/reviews-etag/v1\n" + slug + "\n\napplication/json;api_version=1\n" + literalBody).digest("hex") + '"';
+let compositionEnvironment = process.env;
+beforeEach(() => { compositionEnvironment = process.env; compositionEffects.executeStatement.mockReset(); });
+afterEach(() => {
+  process.env = compositionEnvironment;
+  vi.unstubAllEnvs();
+  for (const mock of Object.values(compositionEffects)) mock.mockReset();
+});
+function queueComposedPage() {
+  compositionEffects.executeStatement.mockResolvedValueOnce(page()).mockResolvedValueOnce(state());
+}
+it("GET-COMPOSE-1 real route authenticates and executes exact PAGE then STATE", async () => {
+  vi.stubEnv("ROASTPILOT_C3_CALLER_SECRET", undefined);
+  const reads: string[] = [];
+  process.env = new Proxy(compositionEnvironment, { get(target, name, receiver) {
+    if (name === "ROASTPILOT_C3_CALLER_SECRET") reads.push(name);
+    return Reflect.get(target, name, receiver);
+  } });
+  vi.resetModules();
+  const route = await import("../app/api/r/[slug]/reviews/route");
+  expect(reads).toEqual([]);
+  expect(compositionEffects.executeStatement).not.toHaveBeenCalled();
+  // Set the fake credential only AFTER import: a module-captured read is invalid.
+  vi.stubEnv("ROASTPILOT_C3_CALLER_SECRET", secret);
+  reads.length = 0;
+  queueComposedPage();
+  let settle: (value: { slug: string }) => void = () => { throw new Error("params not constructed"); };
+  const params = new Promise<{ slug: string }>((resolve) => { settle = resolve; });
+  const pending = route.GET(req(), { params });
+  expect(compositionEffects.executeStatement).not.toHaveBeenCalled();
+  expect(reads).toEqual([]);
+  settle({ slug });
+  const response = await pending;
+  expect(response.status).toBe(200);
+  expect(reads).toEqual(["ROASTPILOT_C3_CALLER_SECRET"]);
+  expect(compositionEffects.executeStatement.mock.calls).toEqual([
+    [composedFirst, { "1": { type: "TEXT", value: slug } }],
+    [composedState, { "1": { type: "TEXT", value: slug }, "2": { type: "TEXT", value: slug } }],
+  ]);
+  compositionEffects.executeStatement.mockReset();
+  vi.stubEnv("ROASTPILOT_C3_CALLER_SECRET", undefined);
+  const unavailable = await route.GET(req(), { params: Promise.resolve({ slug }) });
+  expect(unavailable.status).toBe(503);
+  expect(await unavailable.text()).toBe('{"error":"not_configured"}');
+  expect(unavailable.headers.has("www-authenticate")).toBe(false);
+  expect(compositionEffects.executeStatement).not.toHaveBeenCalled();
+  vi.stubEnv("ROASTPILOT_C3_CALLER_SECRET", secret);
+  const unauthorized = await route.GET(new Request("http://localhost/"), { params: Promise.resolve({ slug }) });
+  expect(unauthorized.status).toBe(401);
+  expect(await unauthorized.text()).toBe('{"error":"unauthorized"}');
+  expect(unauthorized.headers.get("www-authenticate")).toBe("Bearer");
+  const head = await route.GET(req("", {}, "HEAD"), { params: Promise.resolve({ slug }) });
+  expect(head.status).toBe(405);
+  expect(await head.text()).toBe('{"error":"method_not_allowed"}');
+  expect(head.headers.get("allow")).toBe("GET");
+  expect(compositionEffects.executeStatement).not.toHaveBeenCalled();
+});
+it("GET-HTTP-1 exact 200 bytes headers and independent ETag", async () => {
+  vi.stubEnv("ROASTPILOT_C3_CALLER_SECRET", secret);
+  const route = await import("../app/api/r/[slug]/reviews/route");
+  queueComposedPage();
+  const first = await route.GET(req(), { params: Promise.resolve({ slug }) });
+  expect(first.status).toBe(200);
+  expect(await first.text()).toBe(literalBody);
+  expect(first.headers.get("content-type")).toBe("application/json");
+  expect(first.headers.get("cache-control")).toBe("private, no-cache");
+  expect(first.headers.get("etag")).toBe(literalETag);
+  for (const tag of [literalETag, literalETag.slice(2)]) {
+    queueComposedPage();
+    const response = await route.GET(req("", { "if-none-match": tag }), { params: Promise.resolve({ slug }) });
+    expect(response.status).toBe(304);
+    expect(await response.text()).toBe("");
+    expect(response.headers.get("etag")).toBe(literalETag);
+    expect(response.headers.get("cache-control")).toBe("private, no-cache");
+  }
+  for (const tag of ['"nonmatching"', 'w/"malformed"']) {
+    queueComposedPage();
+    const response = await route.GET(req("", { "if-none-match": tag }), { params: Promise.resolve({ slug }) });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(literalBody);
+    expect(response.headers.get("etag")).toBe(literalETag);
+  }
+  compositionEffects.executeStatement.mockReset();
+  const crossSlug = encodeCursor({ orderNs: BigInt("100"), pagingKey: key(100) }, slug + "2");
+  for (const [query, actualSlug, status, body] of [
+    ["", "bad", 404, '{"error":"not_found"}'],
+    ["?cursor=", slug, 400, '{"error":"invalid_cursor"}'],
+    ["?cursor=" + crossSlug, slug, 400, '{"error":"invalid_cursor"}'],
+  ] as const) {
+    const response = await route.GET(req(query), { params: Promise.resolve({ slug: actualSlug }) });
+    expect(response.status).toBe(status);
+    expect(await response.text()).toBe(body);
+    expect(compositionEffects.executeStatement).not.toHaveBeenCalled();
+  }
+});

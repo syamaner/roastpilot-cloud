@@ -59,7 +59,7 @@ select
 from app.cloud_roasts r
 where r.visibility <> 'private';
 
--- AC-3/AC-6/AC-7-NEG/AC-8-NEG: exactly the 11 enumerated columns. Joins to
+-- AC-3/AC-6/AC-7-NEG/AC-8-NEG: exactly 12 columns including D226's derived paging key. Joins to
 -- cloud_roasts so a private roast's reviews are excluded by the same
 -- visibility filter -- a review row has no visibility column of its own,
 -- so this join is the only place that inheritance can be enforced.
