@@ -71,3 +71,16 @@ it("STATE-PARSE-3 rejects wrong columns and row cardinality", () => {
   expect(parseState({ ...valid, rows: [valid.rows[0], valid.rows[0]], rowCount: 2 })).toBeNull();
   expect(parseState({ ...valid, rowCount: 2 })).toBeNull();
 });
+
+it("ROW-4 maps every nullable slider as numeric or explicit null", () => {
+  const numericCells = ["taster", "4", "11", "22", "33", "44", "55", "filter", "distinct sliders", "2026-11-06T12:00:00.000000001+00:00", key(100), "100", "1", "0"];
+  const numeric = parsePage(page([numericCells]))!;
+  expect(numeric).toEqual([{ reviewer_name: "taster", score: 4, aroma: 11, acidity: 22, sweetness: 33, body: 44, aftertaste: 55, brew_method: "filter", notes: "distinct sliders", created_at: "2026-11-06T12:00:00.000000001+00:00", paging_key: key(100), orderNs: BigInt("100"), multiplicity: BigInt("1"), nullKeys: BigInt("0") }]);
+  for (const field of ["aroma", "acidity", "sweetness", "body", "aftertaste"] as const) expect(typeof numeric[0][field]).toBe("number");
+  expect(serializePage(slug, numeric, null)).toBe('{"api_version":1,"public_slug":"' + slug + '","reviews":[{"paging_key":"' + key(100) + '","reviewer_name":"taster","score":4,"aroma":11,"acidity":22,"sweetness":33,"body":44,"aftertaste":55,"brew_method":"filter","notes":"distinct sliders","created_at":"2026-11-06T12:00:00.000000001+00:00"}],"next_cursor":null}');
+  const nullCells = ["taster", "4", null, null, null, null, null, "filter", "null sliders", "2026-11-06T12:00:00.000000001+00:00", key(100), "100", "1", "0"];
+  const nullable = parsePage(page([nullCells]))!;
+  expect(nullable).toEqual([{ reviewer_name: "taster", score: 4, aroma: null, acidity: null, sweetness: null, body: null, aftertaste: null, brew_method: "filter", notes: "null sliders", created_at: "2026-11-06T12:00:00.000000001+00:00", paging_key: key(100), orderNs: BigInt("100"), multiplicity: BigInt("1"), nullKeys: BigInt("0") }]);
+  for (const field of ["aroma", "acidity", "sweetness", "body", "aftertaste"] as const) expect(nullable[0][field]).toBeNull();
+  expect(serializePage(slug, nullable, null)).toBe('{"api_version":1,"public_slug":"' + slug + '","reviews":[{"paging_key":"' + key(100) + '","reviewer_name":"taster","score":4,"aroma":null,"acidity":null,"sweetness":null,"body":null,"aftertaste":null,"brew_method":"filter","notes":"null sliders","created_at":"2026-11-06T12:00:00.000000001+00:00"}],"next_cursor":null}');
+});
