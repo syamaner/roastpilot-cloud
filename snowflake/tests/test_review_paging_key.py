@@ -29,8 +29,23 @@ def test_pk3_uuid_corpus():
 
 
 def test_pk4_app_qualified_refs():
-    sites = re.findall(r"\b(?:from|join)\s+([a-z_.]+)", RAW, re.I)
-    assert sites == ["app.roast_telemetry", "app.cloud_roasts", "app.tasting_reviews", "app.cloud_roasts"]
+    def executable_references(text):
+        executable = re.sub(r"(?m)^[ \t]*--[^\n]*", "", text)
+        return re.findall(r"\b(?:from|join)\s+([a-z_.]+)", executable, re.I)
+
+    expected = ["app.roast_telemetry", "app.cloud_roasts", "app.tasting_reviews", "app.cloud_roasts"]
+    assert executable_references(RAW) == expected
+    comments = "-- FROM fake_table\n  -- join is prose\n\t-- JOIN another_fake\n"
+    assert executable_references(comments) == []
+    assert executable_references(comments + RAW + comments) == expected
+    mixed_keywords = RAW.replace("from app.", "FrOm app.").replace("join app.", "JoIn app.")
+    assert executable_references(mixed_keywords) == expected
+    executable = re.sub(r"(?m)^[ \t]*--[^\n]*", "", RAW)
+    sites = list(re.finditer(r"\b(?:from|join)\s+(app\.[a-z_]+)", executable, re.I))
+    assert len(sites) == 4
+    for site in sites:
+        unqualified = executable[:site.start(1)] + site[1][4:] + executable[site.end(1):]
+        assert executable_references(unqualified) != expected
 
 
 def test_pk5_domain_and_prefix():
