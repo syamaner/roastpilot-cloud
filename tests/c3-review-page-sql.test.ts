@@ -17,6 +17,6 @@ it("SQL-3 view references qualified and projection closed", () => {
 it("SQL-4 exact positional bindings and substitution", async () => {
   const execute = vi.fn(async () => ({ columns: [], rows: [], rowCount: 0 }));
   const reader = createReviewPageReader(execute); const slug = "123456789ABCDEFGHJKLM"; const key = "v1-" + "a".repeat(64);
-  await reader.readPage(slug, null); await reader.readPage(slug, { orderNs: -10n, pagingKey: key }); await reader.readState(slug);
+  await reader.readPage(slug, null); await reader.readPage(slug, { orderNs: BigInt("-10"), pagingKey: key }); await reader.readState(slug);
   expect(execute.mock.calls).toEqual([[PAGE_FIRST, { "1": { type: "TEXT", value: slug } }], [PAGE_NEXT, { "1": { type: "TEXT", value: slug }, "2": { type: "TEXT", value: "-10" }, "3": { type: "TEXT", value: "-10" }, "4": { type: "TEXT", value: key } }], [STATE, { "1": { type: "TEXT", value: slug }, "2": { type: "TEXT", value: slug } }]]);
 });

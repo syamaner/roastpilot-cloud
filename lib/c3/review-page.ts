@@ -66,11 +66,11 @@ const before = (a: Cursor, b: Cursor) => a.orderNs < b.orderNs || (a.orderNs ===
 export function decideReviewPage(page: PageResult, state: PageResult, cursor: Cursor | null, slug: string): PageDecision {
   const current = parseState(state);
   if (current === null) return incomplete("schema");
-  if (current.roastRows === 0n) return { kind: "error", status: 404, error: "not_found" };
+  if (current.roastRows === BigInt("0")) return { kind: "error", status: 404, error: "not_found" };
   const rows = parsePage(page);
-  if (current.roastRows !== 1n || rows === null) return incomplete("schema");
-  if (current.nullKeys !== 0n || rows.some((r) => r.nullKeys !== 0n || r.paging_key === null)) return incomplete("identity");
-  if (current.duplicateKeys !== 0n || rows.some((r) => r.multiplicity !== 1n)) return incomplete("duplicate_key");
+  if (current.roastRows !== BigInt("1") || rows === null) return incomplete("schema");
+  if (current.nullKeys !== BigInt("0") || rows.some((r) => r.nullKeys !== BigInt("0") || r.paging_key === null)) return incomplete("identity");
+  if (current.duplicateKeys !== BigInt("0") || rows.some((r) => r.multiplicity !== BigInt("1"))) return incomplete("duplicate_key");
   const tuples = rows.map((r) => ({ orderNs: r.orderNs, pagingKey: r.paging_key! }));
   if (tuples.some((r, i) => i > 0 && !before(r, tuples[i - 1])) || (cursor !== null && tuples.length > 0 && !before(tuples[0], cursor))) return incomplete("order");
   if (current.reviewRows < BigInt(rows.length)) return incomplete("changed");
