@@ -319,7 +319,11 @@ For a compatible target, run `vercel rollback` to a previous good Production
 deployment, or use `vercel ls` to identify and promote only a deployment that
 was built for Production with Production-scoped variables. Never roll back or
 promote from a Preview deployment. After every release or rollback, re-verify
-BotID and the SSG read path before treating Production as healthy.
+BotID and the uncached read path before treating Production as healthy.
+
+After the C9-C3B uncached release, roll back to or promote only a deployment qualified as uncached (D229).
+An ISR-era deployment is not an eligible rollback target.
+The qualification procedure belongs to C9-C4 and operator gates G5/G6. This runbook selects no retirement mechanism.
 
 ## P4: provide production roast data
 
