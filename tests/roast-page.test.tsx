@@ -4,13 +4,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getReviewsByRoast, getRoastBySlug, type Roast } from "@/lib/roast";
 import { SqlApiError } from "../lib/sqlapi";
-import { unstable_cache } from "next/cache";
 import { notFound } from "next/navigation";
 import NotFound from "../app/r/[slug]/not-found";
-import Page, {
-  generateStaticParams,
-  revalidate,
-} from "../app/r/[slug]/page";
+import Page from "../app/r/[slug]/page";
 import { ReportProblemLink } from "../components/ReportProblemLink";
 
 const notFoundSentinel = vi.hoisted(
@@ -23,17 +19,14 @@ vi.mock("botid/server", () => ({ checkBotId: botIdCheck }));
 vi.mock("@/lib/roast", () => ({
   getRoastBySlug: vi.fn(),
   getReviewsByRoast: vi.fn(),
+  getRoastRatingBySlug: vi.fn(),
 }));
 
 vi.mock("@/lib/slug", async () => import("../lib/slug"));
 
-vi.mock("@/lib/roast-cache", async () => import("../lib/roast-cache"));
 
 vi.mock("@/lib/roast-format", async () => import("../lib/roast-format"));
 
-vi.mock("next/cache", () => ({
-  unstable_cache: vi.fn((read: (slug: string) => unknown) => read),
-}));
 
 vi.mock("next/navigation", () => ({
   notFound: vi.fn(() => {
@@ -43,7 +36,6 @@ vi.mock("next/navigation", () => ({
 
 const roastMock = vi.mocked(getRoastBySlug);
 const reviewsMock = vi.mocked(getReviewsByRoast);
-const unstableCacheMock = vi.mocked(unstable_cache);
 const notFoundMock = vi.mocked(notFound);
 
 const DEMO_SLUG = "demoroastseedone234";
@@ -152,12 +144,12 @@ describe("public roast page control flow", () => {
     expect(markup).toContain('aria-label="Roast curve"');
     expect(markup).not.toContain("0.0 °C");
     expect(markup).not.toMatch(/°\s*F|null|NaN/);
-    expect(unstableCacheMock).toHaveBeenCalledTimes(3);
   });
 
-  it("T-ssg-flags: preserves ISR and on-demand static generation", () => {
-    expect(revalidate).toBe(300);
-    expect(generateStaticParams()).toEqual([]);
+  it("T-uncached-flags: renders on demand without a cache wrapper", async () => {
+    const module = await import("../app/r/[slug]/page");
+    expect(module.dynamic).toBe("force-dynamic");
+    expect(Object.keys(module).sort()).toEqual(["default", "dynamic", "generateMetadata"]);
   });
 
   it("renders a public read when BotID is unavailable without invoking enforcement", async () => {
@@ -175,10 +167,6 @@ describe("public roast page control flow", () => {
       expect(source).not.toMatch(/\b(?:headers|cookies)\s*\(/);
       expect(source).not.toMatch(/from\s+["']next\/headers["']/);
     }
-    expect(revalidate).toBe(300);
-    expect(generateStaticParams()).toEqual([]);
-    const cacheSource = readFileSync(join(process.cwd(), "lib/roast-cache.ts"), "utf8");
-    expect(cacheSource).toContain("unstable_cache(");
   });
 
   it("keeps BotID client protection off the read path", () => {
