@@ -1,9 +1,5 @@
 import type { Metadata } from "next";
-import {
-  cachedReviewsByRoast,
-  cachedRoastBySlug,
-  cachedRoastRatingBySlug,
-} from "@/lib/roast-cache";
+import { getReviewsByRoast, getRoastBySlug, getRoastRatingBySlug } from "@/lib/roast";
 import { beanLabel, roastDateLabel } from "@/lib/roast-format";
 import { isValidSlug } from "@/lib/slug";
 import { notFound } from "next/navigation";
@@ -12,7 +8,7 @@ import { ReviewSection } from "../../../components/ReviewSection";
 import { RoastHeadline } from "../../../components/RoastHeadline";
 import { ReportProblemLink } from "../../../components/ReportProblemLink";
 
-export const revalidate = 300;
+export const dynamic = "force-dynamic";
 
 const MINIMAL_METADATA: Metadata = { title: "RoastPilot Cloud" };
 
@@ -24,10 +20,10 @@ export async function generateMetadata({
   const { slug } = await params;
   if (!isValidSlug(slug)) return MINIMAL_METADATA;
 
-  const roast = await cachedRoastBySlug(slug);
+  const roast = await getRoastBySlug(slug);
   if (roast === null) return MINIMAL_METADATA;
 
-  const { averageScore } = await cachedRoastRatingBySlug(slug);
+  const { averageScore } = await getRoastRatingBySlug(slug);
   const rating = averageScore;
   const roastDate = roastDateLabel(roast);
   const ratingText =
@@ -44,10 +40,6 @@ export async function generateMetadata({
   };
 }
 
-export function generateStaticParams() {
-  return [];
-}
-
 export default async function Page({
   params,
 }: {
@@ -57,11 +49,11 @@ export default async function Page({
 
   if (!isValidSlug(slug)) notFound();
 
-  const roast = await cachedRoastBySlug(slug);
+  const roast = await getRoastBySlug(slug);
 
   if (roast === null) notFound();
 
-  const reviews = await cachedReviewsByRoast(slug);
+  const reviews = await getReviewsByRoast(slug);
 
   return (
     <main className="space-y-6 py-6">
