@@ -147,9 +147,9 @@ describe("public roast page control flow", () => {
   });
 
   it("T-uncached-flags: renders on demand without a cache wrapper", async () => {
-    const module = await import("../app/r/[slug]/page");
-    expect(module.dynamic).toBe("force-dynamic");
-    expect(Object.keys(module).sort()).toEqual(["default", "dynamic", "generateMetadata"]);
+    const pageModule = await import("../app/r/[slug]/page");
+    expect(pageModule.dynamic).toBe("force-dynamic");
+    expect(Object.keys(pageModule).sort()).toEqual(["default", "dynamic", "generateMetadata"]);
   });
 
   it("renders a public read when BotID is unavailable without invoking enforcement", async () => {
