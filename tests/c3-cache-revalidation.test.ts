@@ -43,6 +43,44 @@ it("REV-SHAPE-1 raw query marker yields 400 with zero effects",async()=>{
 it("REV-SHAPE-2 non-JSON content type yields 415 with zero effects",async()=>{const {q,f,response,text}=await run([absent,absent],{contentType:"text/plain"});expect(response.status).toBe(415);expect(text).toBe('{"error":"unsupported_media_type"}');zero(q,f);});
 it("REV-SHAPE-3 non-POST yields 405 Allow POST with zero effects",async()=>{const {q,f,response,text}=await run([absent,absent],{method:"GET"});expect(response.status).toBe(405);expect(text).toBe('{"error":"method_not_allowed"}');expect(response.headers.get("Allow")).toBe("POST");zero(q,f);});
 it("REV-404-1 invalid slug yields not_found before body read",async()=>{const q=request();const f=scripted();const response=await cacheRevalidationPost(q.value,"!!!",f.reader,f.invalidator,()=>secret);expect(response.status).toBe(404);expect(await response.text()).toBe('{"error":"not_found"}');zero(q,f);});
+
+it("REV-PRECEDENCE-AUTH authentication wins over invalid method slug and body", async () => {
+  const cases = [
+    { configured: undefined, status: 503, body: '{"error":"not_configured"}' },
+    { configured: secret, status: 401, body: '{"error":"unauthorized"}' },
+  ];
+  for (const { configured, status, body } of cases) {
+    const q = request({
+      method: "GET",
+      body: "malformed",
+      authorization: "Bearer rpc3_" + "E".repeat(43),
+    });
+    const f = scripted();
+    const response = await cacheRevalidationPost(q.value, "!!!", f.reader, f.invalidator, () => configured);
+    expect(response.status).toBe(status);
+    expect(await response.text()).toBe(body);
+    zero(q, f);
+  }
+});
+
+it("REV-PRECEDENCE-SHAPE shape wins over invalid slug and body", async () => {
+  const q = request({ method: "POST", contentType: "text/plain", body: "malformed" });
+  const f = scripted();
+  const response = await cacheRevalidationPost(q.value, "!!!", f.reader, f.invalidator, () => secret);
+  expect(response.status).toBe(415);
+  expect(await response.text()).toBe('{"error":"unsupported_media_type"}');
+  zero(q, f);
+});
+
+it("REV-PRECEDENCE-SLUG invalid slug wins over malformed body", async () => {
+  const q = request({ body: "malformed" });
+  const f = scripted();
+  const response = await cacheRevalidationPost(q.value, "!!!", f.reader, f.invalidator, () => secret);
+  expect(response.status).toBe(404);
+  expect(await response.text()).toBe('{"error":"not_found"}');
+  zero(q, f);
+});
+
 for(const [name,body] of [["REV-BODY-1 absent body yields 400 with zero effects","absent"],["REV-BODY-2 oversized body yields 400 with zero effects","oversize"],["REV-BODY-3 body read failure yields 400 with zero effects","throw"],["REV-BODY-4 malformed nonce yields 400 with zero effects","malformed"]] as const)it(name,async()=>{const {f,response,text}=await run([absent,absent],{body});expect(response.status).toBe(400);expect(text).toBe('{"error":"invalid_request"}');expect(f.log).toEqual([]);expect(f.invalidate).not.toHaveBeenCalled();});
 it("REV-1 complete exact bytes headers and effect order",async()=>{const {f,response,text}=await run();expect(response.status).toBe(200);expect(text).toBe(complete);expect(response.headers.get("cache-control")).toBe("no-store");expect(response.headers.get("content-type")).toBe("application/json");expect(f.log).toEqual(["absence","invalidate","absence"]);expect(f.invalidate).toHaveBeenCalledWith(slug);});
 it("REV-2 visible roast pending view_present without invalidation",async()=>{const {f,response,text}=await run([present]);expect(response.status).toBe(202);expect(text).toBe(pending("view_present"));expect(f.log).toEqual(["absence"]);expect(f.invalidate).not.toHaveBeenCalled();});
