@@ -16,7 +16,7 @@ function runNode(path: string) {
   return spawnSync(process.execPath, ["--experimental-strip-types", entry, ...args(path)], {
     cwd: process.cwd(),
     encoding: "utf8",
-    env: {},
+    env: { NODE_ENV: "test" },
     timeout: 5000,
   });
 }
