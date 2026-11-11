@@ -17,15 +17,11 @@ vi.mock("@/lib/roast", () => ({
 
 vi.mock("@/lib/slug", async () => import("../lib/slug"));
 
-vi.mock("@/lib/roast-cache", async () => import("../lib/roast-cache"));
 
 vi.mock("@/lib/roast-format", async () => import("../lib/roast-format"));
 
 vi.mock("@/lib/format", async () => import("../lib/format"));
 
-vi.mock("next/cache", () => ({
-  unstable_cache: vi.fn((read: (slug: string) => unknown) => read),
-}));
 
 vi.mock("next/navigation", () => ({
   notFound: vi.fn(),
@@ -40,6 +36,7 @@ vi.mock("next/og", () => ({
 }));
 
 import Image, {
+  dynamic,
   contentType,
   roastImageElement,
   size,
@@ -355,7 +352,7 @@ describe("roast OpenGraph image", () => {
     expect(imageResponseMock).not.toHaveBeenCalled();
   });
 
-  it("T16. reads the rating through the shared cache only for a visible roast", async () => {
+  it("T16. reads the rating only for a visible roast", async () => {
     roastMock.mockResolvedValue(roastFixture());
     ratingMock.mockResolvedValue({ averageScore: 3, reviewCount: 1 });
 
@@ -542,4 +539,15 @@ describe("roast OpenGraph image", () => {
       expect(source).not.toMatch(/\*\s*9\s*\/\s*5/);
     }
   });
+});
+
+it("OG-uncached-flags", () => { expect(dynamic).toBe("force-dynamic"); });
+it("OG-headers", async () => {
+  roastMock.mockResolvedValueOnce(null).mockResolvedValueOnce(roastFixture());
+  ratingMock.mockResolvedValue({ averageScore: 3, reviewCount: 1 });
+  await Image({ params: Promise.resolve({ slug: "!!!" }) });
+  await Image({ params: Promise.resolve({ slug: UNKNOWN_SLUG }) });
+  await Image({ params: Promise.resolve({ slug: DEMO_SLUG }) });
+  expect(imageResponseMock).toHaveBeenCalledTimes(3);
+  for (const call of imageResponseMock.mock.calls) expect((call[1] as { headers: unknown }).headers).toEqual({ "cache-control": "no-store" });
 });

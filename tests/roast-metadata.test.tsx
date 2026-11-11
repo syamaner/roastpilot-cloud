@@ -6,7 +6,6 @@ import {
   type Roast,
 } from "@/lib/roast";
 import { SqlApiError } from "../lib/sqlapi";
-import { unstable_cache } from "next/cache";
 import { generateMetadata } from "../app/r/[slug]/page";
 
 vi.mock("@/lib/roast", () => ({
@@ -17,13 +16,9 @@ vi.mock("@/lib/roast", () => ({
 
 vi.mock("@/lib/slug", async () => import("../lib/slug"));
 
-vi.mock("@/lib/roast-cache", async () => import("../lib/roast-cache"));
 
 vi.mock("@/lib/roast-format", async () => import("../lib/roast-format"));
 
-vi.mock("next/cache", () => ({
-  unstable_cache: vi.fn((read: (slug: string) => unknown) => read),
-}));
 
 vi.mock("next/navigation", () => ({
   notFound: vi.fn(),
@@ -32,7 +27,6 @@ vi.mock("next/navigation", () => ({
 const roastMock = vi.mocked(getRoastBySlug);
 const reviewsMock = vi.mocked(getReviewsByRoast);
 const ratingMock = vi.mocked(getRoastRatingBySlug);
-const unstableCacheMock = vi.mocked(unstable_cache);
 
 const DEMO_SLUG = "demoroastseedone234";
 const UNKNOWN_SLUG = "unknownroastseed123";
@@ -102,12 +96,6 @@ describe("roast OpenGraph metadata", () => {
     expect(roastMock).toHaveBeenCalledWith(DEMO_SLUG);
     expect(ratingMock).toHaveBeenCalledWith(DEMO_SLUG);
     expect(reviewsMock).not.toHaveBeenCalled();
-    expect(unstableCacheMock).toHaveBeenCalledTimes(3);
-    expect(unstableCacheMock.mock.calls.map((call) => call[1])).toEqual([
-      ["roast-by-slug"],
-      ["reviews-by-roast"],
-      ["roast-rating-by-slug"],
-    ]);
   });
 
   it("T10. rounds an all-review aggregate with more than 50 reviews", async () => {

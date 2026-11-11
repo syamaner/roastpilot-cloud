@@ -2,18 +2,16 @@ import type { ReactElement } from "react";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { ImageResponse } from "next/og";
-import {
-  cachedRoastBySlug,
-  cachedRoastRatingBySlug,
-} from "@/lib/roast-cache";
+import { getRoastBySlug, getRoastRatingBySlug, type Roast } from "@/lib/roast";
 import { formatCelsius } from "@/lib/format";
-import type { Roast } from "@/lib/roast";
 import {
   beanLabel,
   roastDateLabel,
   truncateLabel,
 } from "@/lib/roast-format";
 import { isValidSlug } from "@/lib/slug";
+
+export const dynamic = "force-dynamic";
 
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
@@ -349,6 +347,7 @@ export default async function Image({
   const fontData = await loadGeistFont();
   const imageOptions = {
     ...size,
+    headers: { "cache-control": "no-store" },
     fonts: [
       {
         name: "Geist",
@@ -363,11 +362,11 @@ export default async function Image({
     return new ImageResponse(roastImageElement(null, null), imageOptions);
   }
 
-  const roast = await cachedRoastBySlug(slug);
+  const roast = await getRoastBySlug(slug);
   if (roast === null) {
     return new ImageResponse(roastImageElement(null, null), imageOptions);
   }
 
-  const { averageScore } = await cachedRoastRatingBySlug(slug);
+  const { averageScore } = await getRoastRatingBySlug(slug);
   return new ImageResponse(roastImageElement(roast, averageScore), imageOptions);
 }

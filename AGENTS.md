@@ -93,8 +93,7 @@ rubric below) before it opens.
   preview deploys.
 - schemachange (pinned in `snowflake/requirements.txt`) for all Snowflake
   DDL — no ad hoc `ALTER` run by hand outside a migration.
-- Next.js App Router; the public roast page is a server component with ISR,
-  not client-fetched.
+- Next.js App Router; the public roast page, its preview image and their roast, review and rating readers render on the server from uncached reads (D228), not client-fetched.
 - Node/npm; lockfile (`package-lock.json`) always committed alongside a
   dependency change.
 
@@ -131,7 +130,7 @@ F1-S8) — don't add a live Snowflake step to CI without that gate.
 ```text
 roastpilot-cloud/
 ├── app/
-│   ├── r/[slug]/page.tsx                 # public roast page (SSR + ISR)
+│   ├── r/[slug]/page.tsx                 # public roast page (uncached server rendering)
 │   ├── r/[slug]/opengraph-image.tsx      # OG preview image
 │   └── api/r/[slug]/reviews/route.ts     # POST (public) — the only API route
 ├── components/                            # ReviewForm, StarRating, RoastCurve, FlavorSliders

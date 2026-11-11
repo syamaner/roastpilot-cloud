@@ -5,29 +5,19 @@ import postcss from "postcss";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Roast } from "@/lib/roast";
-import {
-  cachedReviewsByRoast,
-  cachedRoastBySlug,
-} from "@/lib/roast-cache";
-import Page, {
-  generateStaticParams,
-  revalidate,
-} from "../app/r/[slug]/page";
+import { getReviewsByRoast, getRoastBySlug } from "@/lib/roast";
+import Page, { dynamic } from "../app/r/[slug]/page";
 import RootLayout from "../app/layout";
 import postcssConfig from "../postcss.config.mjs";
 
-vi.mock("@/lib/roast-cache", () => ({
-  cachedRoastBySlug: vi.fn(),
-  cachedReviewsByRoast: vi.fn(),
-  cachedRoastRatingBySlug: vi.fn(),
-}));
+vi.mock("@/lib/roast", () => ({ getRoastBySlug: vi.fn(), getReviewsByRoast: vi.fn(), getRoastRatingBySlug: vi.fn() }));
 
 vi.mock("@/lib/slug", async () => import("../lib/slug"));
 
 vi.mock("@/lib/roast-format", async () => import("../lib/roast-format"));
 
-const roastMock = vi.mocked(cachedRoastBySlug);
-const reviewsMock = vi.mocked(cachedReviewsByRoast);
+const roastMock = vi.mocked(getRoastBySlug);
+const reviewsMock = vi.mocked(getReviewsByRoast);
 const globalsCssPath = join(process.cwd(), "app/globals.css");
 const globalsCss = readFileSync(globalsCssPath, "utf8");
 const themeTokenNames = [
@@ -232,9 +222,8 @@ describe("theme and layout shell", () => {
     );
   });
 
-  it("T-4 preserves static generation for public roast pages", () => {
-    expect(revalidate).toBe(300);
-    expect(generateStaticParams()).toEqual([]);
+  it("T-4 renders public roast pages on demand", () => {
+    expect(dynamic).toBe("force-dynamic");
   });
 
   it("T-6 keeps the shell static and anonymous", () => {
