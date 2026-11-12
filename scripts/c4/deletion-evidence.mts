@@ -249,7 +249,11 @@ function completeRecord(item: Record): boolean {
         && first.deletion === "already_tombstoned";
     }
     case "recovered_cache_failure": {
-      const outcomes = new Set(item.attempts.slice(0, -1).flatMap((attempt) =>
+      const firstServerIndex = item.attempts.indexOf(first);
+      const firstCompletionIndex = item.attempts.findIndex((attempt) =>
+        attempt.kind === "cache_attempt" && attempt.outcome === "complete");
+      const qualifyingAttempts = item.attempts.slice(firstServerIndex + 1, firstCompletionIndex);
+      const outcomes = new Set(qualifyingAttempts.flatMap((attempt) =>
         attempt.kind === "cache_attempt" ? [attempt.outcome] : []));
       if (!outcomes.has("pending")) return false;
       if (!outcomes.has("refused")) return false;

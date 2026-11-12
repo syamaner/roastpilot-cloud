@@ -137,6 +137,26 @@ it("T25 client display", () => {
   expect(edit(({ records }) => { records[0].attempts[1].client.e6 = "pending"; })).toEqual(reject("client_state"));
 });
 
+it("T26 pending before server result", () => {
+  expect(edit(({ records }) => {
+    const record = records[3];
+    const [moved] = record.attempts.splice(1, 1);
+    const pending = cached(moved);
+    pending.client = { e3: false, e7: false, e6: "pending" };
+    record.attempts.unshift(pending);
+  })).toEqual(unfinished);
+});
+
+it("T27 pending after first cache completion", () => {
+  expect(edit(({ records }) => {
+    const record = records[3];
+    const [pending] = record.attempts.splice(1, 1);
+    const earlierCompletion = cache(record.identity_ref, record.slug_ref, 99, "complete");
+    earlierCompletion.client = { e3: true, e7: false, e6: "pending" };
+    record.attempts.splice(-1, 0, earlierCompletion, pending);
+  })).toEqual(unfinished);
+});
+
 it("accepts the four independent synthetic recordings", () => {
   expect(verify(fixture())).toEqual(complete);
 });

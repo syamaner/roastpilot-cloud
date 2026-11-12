@@ -56,7 +56,9 @@ A finished record ends with exact cache completion and both durable acknowledgem
 | `first_attempt_complete` | One first delete result followed by one exact cache completion. |
 | `recovered_stage_failure` | Failed stage removal on the first server result. Later same-identity, same-sequence already-tombstoned result reports removal. No server failure is used to qualify this case. |
 | `recovered_lost_server_ack` | First server attempt loses or malforms the acknowledgement and has retained same-operation commit evidence. Recovery reports already tombstoned, followed by exact cache completion. A fresh delete after pre-commit transport failure is insufficient. |
-| `recovered_cache_failure` | Pending, refused, transport lost and malformed 200 before final exact completion for the same identity, using a fresh nonce each time. |
+| `recovered_cache_failure` | Pending, refused, transport lost and malformed 200 strictly after the first valid same-identity server result and strictly before the first valid cache completion. Use a fresh nonce each time and finish with exact cache completion. |
+
+Observations outside that interval still undergo identity, shape, nonce and client-state checks. They cannot satisfy a required cache failure. This interval defines offline evidence coverage. Agent runtime request order belongs to the Agent contract.
 
 D223 allows private stage bytes to persist indefinitely. D229 allows provider bytes to remain and a previously in-flight uncached response to finish. Edge and third-party copies remain residuals.
 
