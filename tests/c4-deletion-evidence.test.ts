@@ -300,3 +300,90 @@ it("applies input and release rejection before scenario evaluation", () => {
   const { version, evidence, ...rest } = input;
   expect(verifyDeletionEvidence(encode({ version, evidence, ...rest }), "c".repeat(40), planCommit)).toEqual(reject("not_canonical"));
 });
+
+it("requires both durable acknowledgements at completion", () => {
+  expect(edit(({ records }) => {
+    const [server, completion] = records[0].attempts;
+    server.client = { e3: false, e7: false, e6: "pending" };
+    completion.client = { e3: false, e7: true, e6: "pending" };
+  })).toEqual(unfinished);
+  expect(edit(({ records }) => {
+    records[0].attempts[1].client = { e3: true, e7: false, e6: "pending" };
+  })).toEqual(unfinished);
+});
+
+it("requires a first-attempt record to have exactly the first result and completion", () => {
+  expect(edit(({ records }) => {
+    const record = records[0];
+    record.attempts.splice(1, 0, cache(record.identity_ref, record.slug_ref, 99, "pending"));
+  })).toEqual(unfinished);
+});
+
+it("does not qualify stage recovery if the record contains a server failure", () => {
+  expect(edit(({ records }) => {
+    const record = records[1];
+    record.attempts.splice(1, 0, {
+      kind: "server_failure",
+      identity_ref: record.identity_ref,
+      failure_class: "sql_error",
+      commit_observation: "unknown",
+      client: { e3: true, e7: false, e6: "pending" },
+    });
+  })).toEqual(unfinished);
+});
+
+it("rejects non-null fields that a cache outcome cannot project", () => {
+  for (const [index, field, value] of [
+    [2, "response_slug_ref", ref(14)],
+    [3, "no_store", false],
+    [4, "reason", "view_present"],
+    [1, "evidence", cached(fixture().records[0].attempts[1]).evidence],
+  ] as const) {
+    expect(edit(({ records }) => {
+      Object.assign(records[3].attempts[index], { [field]: value });
+    })).toEqual(reject("contradiction"));
+  }
+});
+
+it("rejects wrong suite constants, malformed references, unknown attempt kinds and nested extra keys", () => {
+  for (const override of [
+    { evidence: "roastpilot/c9-c4/other" },
+    { version: 2 },
+    { target_class: "production" },
+  ]) {
+    expect(verify({ ...fixture(), ...override })).toEqual(reject("schema"));
+  }
+  for (const identity of ["a".repeat(63), "A".repeat(64)]) {
+    expect(edit(({ records }) => { records[0].identity_ref = identity; })).toEqual(reject("schema"));
+  }
+  expect(edit(({ records }) => {
+    Object.assign(records[0].attempts[0], { kind: "unknown" });
+  })).toEqual(reject("schema"));
+  expect(edit(({ records }) => {
+    Object.assign(records[0].attempts[0].client, { extra: true });
+  })).toEqual(reject("schema"));
+  expect(verifyDeletionEvidence(new TextEncoder().encode("{\n"), cloudCommit, planCommit))
+    .toEqual(reject("schema"));
+});
+
+it("accepts zero deletion sequence and rejects negative sequence", () => {
+  expect(edit(({ records }) => {
+    response(records[0].attempts[0]).deletion_write_seq = 0;
+  })).toEqual(complete);
+  expect(edit(({ records }) => {
+    response(records[0].attempts[0]).deletion_write_seq = -1;
+  })).toEqual(reject("schema"));
+});
+
+it("reports the first contradictory record in observation order ahead of incompleteness", () => {
+  const input = fixture();
+  const [clientProblem, identityProblem, incompleteRecord, finalRecord] = input.records;
+  clientProblem.attempts[1].client.e6 = "pending";
+  identityProblem.attempts[1].identity_ref = ref(99);
+  incompleteRecord.attempts = [];
+
+  input.records = [incompleteRecord, clientProblem, identityProblem, finalRecord];
+  expect(verify(input)).toEqual(reject("client_state"));
+  input.records = [incompleteRecord, identityProblem, clientProblem, finalRecord];
+  expect(verify(input)).toEqual(reject("identity_mismatch"));
+});

@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 import { isCommit, verifyDeletionEvidence, type Verdict } from "./deletion-evidence.mts";
@@ -33,7 +33,16 @@ function format(verdict: Verdict) {
   };
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+function isDirectEntry(argument: string | undefined): boolean {
+  if (!argument) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(argument)).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectEntry(process.argv[1])) {
   const result = runDeletionEvidenceCli(process.argv.slice(2));
   process.stdout.write(result.stdout);
   process.stderr.write(result.stderr);

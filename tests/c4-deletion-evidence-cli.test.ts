@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -12,8 +12,8 @@ const entry = "scripts/c4/deletion-evidence-cli.mts";
 const args = (path: string) => ["--expected-cloud-commit", cloudCommit, "--expected-plan-commit", planCommit, path];
 const usage = "usage: deletion-evidence-cli --expected-cloud-commit <40-hex> --expected-plan-commit <40-hex> <evidence-file>\n";
 
-function runNode(path: string) {
-  return spawnSync(process.execPath, ["--experimental-strip-types", entry, ...args(path)], {
+function runNode(script: string, flags: readonly string[]) {
+  return spawnSync(process.execPath, ["--experimental-strip-types", script, ...flags], {
     cwd: process.cwd(),
     encoding: "utf8",
     env: { NODE_ENV: "test" },
@@ -33,12 +33,36 @@ it("executes the documented Node entry point for complete, incomplete and reject
       [encode({ private: "must-not-echo" }), 1, '{"verdict":"evidence_rejected","reason":"schema"}\n'],
     ] as const) {
       writeFileSync(path, bytes);
-      const result = runNode(path);
+      const result = runNode(entry, args(path));
       expect(result.error).toBeUndefined();
       expect(result.signal).toBeNull();
       expect(result.status).toBe(status);
       expect(result.stdout).toBe(stdout);
       expect(result.stderr).toBe("");
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("executes the same entry contract through an absolute symlink", () => {
+  const directory = mkdtempSync(join(tmpdir(), "c4-synthetic-alias-"));
+  try {
+    const alias = join(directory, "entry.mts");
+    const path = join(directory, "synthetic.json");
+    symlinkSync(join(process.cwd(), entry), alias);
+    writeFileSync(path, encode(fixture()));
+
+    for (const [flags, status, stdout, stderr] of [
+      [[], 2, "", usage],
+      [args(path), 0, '{"verdict":"evidence_structurally_complete"}\n', ""],
+    ] as const) {
+      const result = runNode(alias, flags);
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      expect(result.status).toBe(status);
+      expect(result.stdout).toBe(stdout);
+      expect(result.stderr).toBe(stderr);
     }
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -87,5 +111,27 @@ it("covers the direct dispatch and exit assignment in the instrumented module", 
     process.exitCode = originalExit;
     stdout.mockRestore();
     stderr.mockRestore();
+  }
+});
+
+it("imports silently when the process entry is unavailable", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "c4-import-only-"));
+  vi.resetModules();
+  const originalArgv = process.argv;
+  const originalExit = process.exitCode;
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  try {
+    process.argv = [process.execPath, join(directory, "absent.mts")];
+    await import("../scripts/c4/deletion-evidence-cli.mts");
+    expect(stdout).not.toHaveBeenCalled();
+    expect(stderr).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(originalExit);
+  } finally {
+    process.argv = originalArgv;
+    process.exitCode = originalExit;
+    stdout.mockRestore();
+    stderr.mockRestore();
+    rmSync(directory, { recursive: true, force: true });
   }
 });

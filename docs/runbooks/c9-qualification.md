@@ -8,13 +8,15 @@ G1–G6 remain operator-only and unperformed, and the cloud-sync feature stays o
 
 This procedure records observations from a separately authorised synthetic DEV run. It gives no authority or instructions to produce faults or operate on a deployment. The verifier does not establish that an observation occurred, identify a running deployment or establish a complete deployment inventory. A deployment, rollback or configuration change requires fresh operator evidence.
 
+Structural checking cannot verify the synthetic target or certify the existence or removal of dependent rows and stage files.
+
 ## Protect and bind the recording
 
 Use the [backup manifest's protected evidence controls](backup-export.md) for the recording and underlying observations. Keep the file in the approved encrypted store with access restricted to authorised operators. Keep the independently verified full lowercase Cloud and Plan commits with the recording. Supply those expected commits from the approved run binding when verifying.
 
 Before projecting any response, verify the actual observed identifiers, request and response bytes, and applicable headers. Keep the original observations in the protected store. Do not publish or log references, raw identifiers, request or response bytes, credentials or paths.
 
-For every reference, compute SHA-256 over UTF-8 bytes of the following segments with one LF between segments and no final LF. Use the 64 lowercase hex digest.
+For every reference, compute SHA-256 over UTF-8 bytes of the following segments with one LF between segments and no final LF. Use the 64 lowercase hex digest. A person with the underlying value and the applicable framing segments can recompute the digest and confirm the reference.
 
 | Reference | Segments in order |
 |---|---|
@@ -51,6 +53,8 @@ Record the durable client state after each attempt. E3 and E7 begin false and ne
 
 A finished record ends with exact cache completion and both durable acknowledgements. Its latest server result reports stage removal `removed`, a point-in-time observation separate from the durable acknowledgements. The finished suite covers all four scenarios and all three server response classes.
 
+The deletion procedure reports `removed` when `REMOVE` returns without an error. The result describes that attempt at that point in time.
+
 | Scenario | Observations |
 |---|---|
 | `first_attempt_complete` | One first delete result followed by one exact cache completion. |
@@ -61,6 +65,8 @@ A finished record ends with exact cache completion and both durable acknowledgem
 Observations outside that interval still undergo identity, shape, nonce and client-state checks. They cannot satisfy a required cache failure. This interval defines offline evidence coverage. Agent runtime request order belongs to the Agent contract.
 
 D223 allows private stage bytes to persist indefinitely. D229 allows provider bytes to remain and a previously in-flight uncached response to finish. Edge and third-party copies remain residuals.
+
+Physical erasure and actual provider retention are outside this proof.
 
 ## Verify offline
 
