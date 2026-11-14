@@ -1,5 +1,5 @@
 import { readFileSync, realpathSync } from "node:fs";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 import { isCommit, verifyDeletionEvidence, type Verdict } from "./deletion-evidence.mts";
 
@@ -36,7 +36,7 @@ function format(verdict: Verdict) {
 function isDirectEntry(argument: string | undefined): boolean {
   if (!argument) return false;
   try {
-    return import.meta.url === pathToFileURL(realpathSync(argument)).href;
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(argument);
   } catch {
     return false;
   }

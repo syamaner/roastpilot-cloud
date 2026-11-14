@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -132,6 +132,46 @@ it("imports silently when the process entry is unavailable", async () => {
     process.exitCode = originalExit;
     stdout.mockRestore();
     stderr.mockRestore();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("T34 resolves both entry paths with preserve-symlinks-main", () => {
+  const directory = mkdtempSync(join(tmpdir(), "c4-preserved-entry-"));
+  try {
+    const cli = join(directory, "deletion-evidence-cli.mts");
+    const alias = join(directory, "alias.mts");
+    const missingEvidence = join(directory, "absent.json");
+    copyFileSync(join(process.cwd(), entry), cli);
+    copyFileSync(join(process.cwd(), "scripts/c4/deletion-evidence.mts"), join(directory, "deletion-evidence.mts"));
+    symlinkSync(join(process.cwd(), "node_modules"), join(directory, "node_modules"), "dir");
+    symlinkSync(cli, alias);
+
+    const invocation = [
+      "--experimental-strip-types", "--preserve-symlinks-main", alias, ...args(missingEvidence),
+    ];
+    const result = spawnSync(process.execPath, invocation, {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: { NODE_ENV: "test" },
+      timeout: 5000,
+    });
+    console.info("T34 subprocess " + JSON.stringify({
+      argv: [process.execPath, ...invocation],
+      cwd: process.cwd(),
+      status: result.status,
+      signal: result.signal,
+      stdout: result.stdout,
+      stderr: result.stderr,
+    }));
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect({ status: result.status, stdout: result.stdout, stderr: result.stderr }).toEqual({
+      status: 1,
+      stdout: '{"verdict":"evidence_rejected","reason":"unreadable"}\n',
+      stderr: "",
+    });
+  } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 });

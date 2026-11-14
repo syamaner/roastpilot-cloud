@@ -471,3 +471,41 @@ it("validates the current record before checking its cross-record overlaps", () 
     records[3].attempts[1].identity_ref = ref(99);
   })).toEqual(reject("identity_mismatch"));
 });
+
+it("rejects a colliding deletion sequence across two null-reference records", () => {
+  expect(edit(({ records }) => {
+    const fourth = response(records[3].attempts[0]);
+    fourth.deletion = "tombstoned_without_row";
+    fourth.cloud_roast_ref = null;
+    fourth.deletion_write_seq = response(records[1].attempts[0]).deletion_write_seq;
+  })).toEqual(reject("contradiction"));
+});
+
+it("reports an earlier validated sequence collision before later invalid client state", () => {
+  const input = fixture();
+  const [first, second, , fourth] = input.records;
+  const originalSequence = response(second.attempts[0]).deletion_write_seq;
+  const originalReplaySequence = response(second.attempts[1]).deletion_write_seq;
+  const collision = response(first.attempts[0]).deletion_write_seq;
+  response(second.attempts[0]).deletion_write_seq = collision;
+  response(second.attempts[1]).deletion_write_seq = collision;
+  fourth.attempts[1].client.e6 = "deleted";
+
+  expect(verify(input)).toEqual(reject("contradiction"));
+  response(second.attempts[0]).deletion_write_seq = originalSequence;
+  response(second.attempts[1]).deletion_write_seq = originalReplaySequence;
+  expect(verify(input)).toEqual(reject("client_state"));
+});
+
+it("rejects a sequence collision before otherwise consistent incompleteness", () => {
+  const input = fixture();
+  const [first, , third, fourth] = input.records;
+  third.attempts = [];
+  const fourthResponse = response(fourth.attempts[0]);
+  const originalSequence = fourthResponse.deletion_write_seq;
+  fourthResponse.deletion_write_seq = response(first.attempts[0]).deletion_write_seq;
+
+  expect(verify(input)).toEqual(reject("contradiction"));
+  fourthResponse.deletion_write_seq = originalSequence;
+  expect(verify(input)).toEqual(unfinished);
+});

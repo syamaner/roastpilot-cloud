@@ -62,3 +62,10 @@ it("pins the retry interval, evidence protection and structural verdict boundary
     expect(runbook).toContain(text);
   }
 });
+
+it("excludes secrets before retention and protects the remaining evidence", () => {
+  expect(runbook).toContain("Before retaining any observation, exclude the Authorization header, bearer credential and other secrets.");
+  expect(runbook).toContain("Keep non-secret request and response bytes and applicable header evidence in the protected store.");
+  expect(runbook).toContain("Use a non-identifying local evidence filename.");
+  expect(runbook).toContain("[backup manifest's protected evidence controls](backup-export.md)");
+});

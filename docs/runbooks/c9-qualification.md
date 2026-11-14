@@ -14,7 +14,7 @@ Structural checking cannot verify the synthetic target or certify the existence 
 
 Use the [backup manifest's protected evidence controls](backup-export.md) for the recording and underlying observations. Keep the file in the approved encrypted store with access restricted to authorised operators. Keep the independently verified full lowercase Cloud and Plan commits with the recording. Supply those expected commits from the approved run binding when verifying.
 
-Before projecting any response, verify the actual observed identifiers, request and response bytes, and applicable headers. Keep the original observations in the protected store. Do not publish or log references, raw identifiers, request or response bytes, credentials or paths.
+Before projecting any response, verify the actual observed identifiers, request and response bytes, and applicable headers. Before retaining any observation, exclude the Authorization header, bearer credential and other secrets. Keep non-secret request and response bytes and applicable header evidence in the protected store. Use a non-identifying local evidence filename. Do not publish or log references, raw identifiers, request or response bytes, credentials or paths.
 
 For every reference, compute SHA-256 over UTF-8 bytes of the following segments with one LF between segments and no final LF. Use the 64 lowercase hex digest. A person with the underlying value and the applicable framing segments can recompute the digest and confirm the reference.
 
@@ -77,6 +77,8 @@ From the repository root with Node 22, use:
 ```text
 node --experimental-strip-types scripts/c4/deletion-evidence-cli.mts --expected-cloud-commit <cloud-commit> --expected-plan-commit <plan-commit> <evidence-file>
 ```
+
+The CLI also supports a symlink to its entry file. With `--preserve-symlinks-main`, keep the symlink beside the CLI and its sibling verifier so Node can resolve the import. A Node module-resolution error happens before the verifier runs.
 
 The CLI emits one compact JSON verdict followed by LF. Interpret exit and verdict together:
 
