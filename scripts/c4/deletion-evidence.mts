@@ -288,6 +288,8 @@ export function verifyDeletionEvidence(
   const scenarios = new Set<string>();
   const slugs = new Set<string>();
   const nonces = new Set<string>();
+  const roastReferences = new Set<string>();
+  const deletionSequences = new Set<ServerResponse["deletion_write_seq"]>();
   for (const item of input.records) {
     if (identities.has(item.identity_ref)) return rejected("contradiction");
     if (scenarios.has(item.scenario)) return rejected("contradiction");
@@ -297,6 +299,14 @@ export function verifyDeletionEvidence(
     slugs.add(item.slug_ref);
     const problem = checkObservations(item, nonces);
     if (problem) return rejected(problem);
+    const firstResponse = item.attempts.find((attempt) => attempt.kind === "server_response");
+    if (firstResponse) {
+      const { cloud_roast_ref: roast, deletion_write_seq: sequence } = firstResponse;
+      if (roast !== null && roastReferences.has(roast)) return rejected("contradiction");
+      if (deletionSequences.has(sequence)) return rejected("contradiction");
+      if (roast !== null) roastReferences.add(roast);
+      deletionSequences.add(sequence);
+    }
   }
 
   if (input.records.some((item) => !completeRecord(item))) return incomplete("scenario_unsatisfied");

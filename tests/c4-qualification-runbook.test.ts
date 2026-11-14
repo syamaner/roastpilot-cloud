@@ -42,3 +42,23 @@ it("documents the exact invocation, projections, reference frames and outcome bo
     expect(runbook).toContain(text);
   }
 });
+
+it("pins the retry interval, evidence protection and structural verdict boundary", () => {
+  for (const text of [
+    "strictly after the first valid same-identity server result and strictly before the first valid cache completion",
+    "Observations outside that interval still undergo identity, shape, nonce and client-state checks.",
+    "Use a fresh nonce each time and finish with exact cache completion.",
+    "Interpret exit and verdict together:",
+    "Exit 0, `evidence_structurally_complete`",
+    "Exit 1, `evidence_incomplete`",
+    "Exit 1, `evidence_rejected`",
+    "Exit 2: invalid invocation, with empty stdout and a fixed usage line on stderr.",
+    "Keep the file in the approved encrypted store with access restricted to authorised operators.",
+    "Do not publish or log references, raw identifiers, request or response bytes, credentials or paths.",
+    "The records represent separate deletion operations under the same coordinator.",
+    "The permanent minimal tombstone retains deletion identity and sequence.",
+    "Physical erasure and actual provider retention are outside this proof.",
+  ]) {
+    expect(runbook).toContain(text);
+  }
+});

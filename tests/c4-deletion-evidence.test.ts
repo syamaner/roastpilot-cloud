@@ -40,7 +40,7 @@ it("T05 duplicate scenario", () => {
     records.push({
       scenario: "first_attempt_complete", identity_ref: ref(50), slug_ref: ref(51),
       attempts: [
-        server(ref(50), "deleted", ref(52), 7, "removed"),
+        server(ref(50), "deleted", ref(52), 12, "removed"),
         cache(ref(50), ref(51), 53, "complete"),
       ],
     });
@@ -386,4 +386,88 @@ it("reports the first contradictory record in observation order ahead of incompl
   expect(verify(input)).toEqual(reject("client_state"));
   input.records = [incompleteRecord, identityProblem, clientProblem, finalRecord];
   expect(verify(input)).toEqual(reject("identity_mismatch"));
+});
+
+it("T28 cross-record roast reference", () => {
+  expect(edit(({ records }) => {
+    response(records[3].attempts[0]).cloud_roast_ref = response(records[0].attempts[0]).cloud_roast_ref;
+  })).toEqual(reject("contradiction"));
+});
+
+it("T29 cross-record deletion sequence", () => {
+  expect(edit(({ records }) => {
+    response(records[3].attempts[0]).deletion_write_seq = response(records[0].attempts[0]).deletion_write_seq;
+  })).toEqual(reject("contradiction"));
+});
+
+it("T30 pending cannot advance E7", () => {
+  expect(edit(({ records }) => {
+    for (const attempt of records[3].attempts.slice(1)) {
+      attempt.client = { e3: true, e7: true, e6: "deleted" };
+    }
+  })).toEqual(reject("client_state"));
+});
+
+it("T31 refused content type must be null", () => {
+  expect(edit(({ records }) => {
+    cached(records[3].attempts[2]).content_type = "application/json";
+  })).toEqual(reject("contradiction"));
+});
+
+it("T32 refused complete evidence must be null", () => {
+  expect(edit(({ records }) => {
+    cached(records[3].attempts[2]).evidence = cached(records[0].attempts[1]).evidence;
+  })).toEqual(reject("contradiction"));
+});
+
+it("T33 final cache attempt must be complete", () => {
+  expect(edit(({ records }) => {
+    const record = records[3];
+    const failed = cache(record.identity_ref, record.slug_ref, 99, "transport_lost");
+    failed.client = { e3: true, e7: true, e6: "deleted" };
+    record.attempts.push(failed);
+  })).toEqual(unfinished);
+});
+
+it("excludes null roast references from cross-record uniqueness", () => {
+  expect(edit(({ records }) => {
+    const fourth = response(records[3].attempts[0]);
+    fourth.deletion = "tombstoned_without_row";
+    fourth.cloud_roast_ref = null;
+  })).toEqual(complete);
+});
+
+it("treats zero like every other sequence for cross-record uniqueness", () => {
+  expect(edit(({ records }) => {
+    response(records[0].attempts[0]).deletion_write_seq = 0;
+    response(records[3].attempts[0]).deletion_write_seq = 0;
+  })).toEqual(reject("contradiction"));
+});
+
+it.each([400, 401, 404, 405, 415, 503])("accepts recorded refusal status %i with the other fields null", (status) => {
+  expect(edit(({ records }) => {
+    cached(records[3].attempts[2]).status = status;
+  })).toEqual(complete);
+});
+
+it.each(["view_present", "view_invalid", "view_unavailable", "invalidation_failed"])(
+  "accepts pending reason %s independently",
+  (reason) => {
+    expect(edit(({ records }) => {
+      cached(records[3].attempts[1]).reason = reason;
+    })).toEqual(complete);
+  },
+);
+
+it("accepts a malformed acknowledgement followed by recovery with observed commit", () => {
+  expect(edit(({ records }) => {
+    failure(records[2].attempts[0]).failure_class = "malformed_response";
+  })).toEqual(complete);
+});
+
+it("validates the current record before checking its cross-record overlaps", () => {
+  expect(edit(({ records }) => {
+    response(records[3].attempts[0]).deletion_write_seq = response(records[0].attempts[0]).deletion_write_seq;
+    records[3].attempts[1].identity_ref = ref(99);
+  })).toEqual(reject("identity_mismatch"));
 });
