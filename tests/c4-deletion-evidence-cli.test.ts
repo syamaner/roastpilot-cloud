@@ -175,3 +175,40 @@ it("T34 resolves both entry paths with preserve-symlinks-main", () => {
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+it("reads an accepted synthetic file with the default reader", () => {
+  const directory = mkdtempSync(join(tmpdir(), "c4-default-reader-"));
+  try {
+    const path = join(directory, "synthetic.json");
+    writeFileSync(path, encode(fixture()));
+
+    expect(runDeletionEvidenceCli(args(path))).toEqual({
+      exit: 0,
+      stdout: '{"verdict":"evidence_structurally_complete"}\n',
+      stderr: "",
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("imports silently when argv has no process entry", async () => {
+  vi.resetModules();
+  const originalArgv = process.argv;
+  const originalExit = process.exitCode;
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  try {
+    process.argv = [process.execPath];
+    await import("../scripts/c4/deletion-evidence-cli.mts");
+
+    expect(stdout).not.toHaveBeenCalled();
+    expect(stderr).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(originalExit);
+  } finally {
+    process.argv = originalArgv;
+    process.exitCode = originalExit;
+    stdout.mockRestore();
+    stderr.mockRestore();
+  }
+});

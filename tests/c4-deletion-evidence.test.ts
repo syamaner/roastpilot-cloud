@@ -509,3 +509,23 @@ it("rejects a sequence collision before otherwise consistent incompleteness", ()
   fourthResponse.deletion_write_seq = originalSequence;
   expect(verify(input)).toEqual(unfinished);
 });
+
+it("accepts a same-sequence server replay within the cache retry interval", () => {
+  expect(edit(({ records }) => {
+    const record = records[3];
+    const first = response(record.attempts[0]);
+    const replay = { ...first, deletion: "already_tombstoned" } as const;
+    record.attempts.splice(2, 0, replay);
+  })).toEqual(complete);
+});
+
+it("rejects other attempt kinds in the typed fixture helpers", () => {
+  const { records } = fixture();
+  const serverResponse = records[0].attempts[0];
+  const cacheAttempt = records[0].attempts[1];
+  const serverFailure = records[2].attempts[0];
+
+  expect(() => response(cacheAttempt)).toThrow("Expected synthetic server response");
+  expect(() => failure(serverResponse)).toThrow("Expected synthetic server failure");
+  expect(() => cached(serverFailure)).toThrow("Expected synthetic cache attempt");
+});
