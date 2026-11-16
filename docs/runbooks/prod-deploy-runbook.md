@@ -324,6 +324,7 @@ BotID and the uncached read path before treating Production as healthy.
 After the C9-C3B uncached release, roll back to or promote only a deployment qualified as uncached (D229).
 An ISR-era deployment is not an eligible rollback target.
 The qualification procedure belongs to C9-C4 and operator gates G5/G6. This runbook selects no retirement mechanism.
+Record and verify the fleet transition evidence using [the C9-C4 qualification procedure](c9-transition-qualification.md) before relying on it in G5 or G6.
 
 ## P4: provide production roast data
 
@@ -410,8 +411,7 @@ honeypot's 200 response. All of those outcomes occur before BotID and therefore
 do not verify its scripted-write denial.
 
 A placeholder such as `missing` can fail route validation before Snowflake is
-queried. A previously requested valid slug can return a cached null for five
-minutes. Using a fresh, route-valid slug ensures that the 404 performs the
+queried. An ISR-era deployment may return a cached null for a previously requested valid slug. A request reaching the uncached reader makes a fresh server read. Using a fresh, route-valid slug ensures that the 404 performs the
 production query and therefore proves that Vercel can authenticate with the
 production key-pair, use the `PUBLIC_WEB` grants and reach Snowflake. The
 browser submission verifies the positive write path; the scripted POST
