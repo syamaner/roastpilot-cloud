@@ -57,3 +57,32 @@ it("limits cached-null guidance to ISR-era deployments and points at the fleet e
     "Record and verify the fleet transition evidence using [the C9-C4 qualification procedure](c9-transition-qualification.md) before relying on it in G5 or G6.",
   ].join("\n"));
 });
+
+it("pins the separately qualified consumer verification and the old-slot requirement", () => {
+  expect(rotation).toContain("Rotate this principal by updating the Environment secret as a GitHub operator.");
+  expect(rotation).toContain("Verification for this consumer requires a separately qualified operator procedure. Keep the old slot until that verification succeeds.");
+  expect(rotation).toContain("Do not copy the secret into a\nrepository file.");
+  expect(rotation).toContain("`dev-snowflake-agent` GitHub Environment and follow the separately qualified verification procedure described under Verify.");
+  expect(rotation).toContain("Before relying on an authentication probe, confirm that the exact consumer\n   target was updated");
+  expect(rotation).toContain("the correct GitHub Environment secret and the independently verified consumer binding under that procedure.");
+  expect(rotation).toContain("| Update the `dev-snowflake-agent` Environment secret and verify under a separately qualified procedure | GitHub operator and authorised operator |");
+});
+
+it("keeps the transition runbook free of the listed claims of completed live qualification", () => {
+  const contradictory = /\b(?:G[56]\s+(?:(?:has\s+been|is)\s+qualified|(?:has\s+been|is)\s+complete(?:d)?)|cloud\s+sync\s+(?:is|stays)\s+(?:on|active|enabled))\b/i;
+  expect(transition).not.toMatch(contradictory);
+  for (const line of [
+    "G5 has been qualified.", "G6 has been qualified.", "G5 is qualified.", "G6 is complete.",
+    "Cloud sync is on.", "Cloud sync is active.", "Cloud sync is enabled.",
+  ]) expect(transition + "\n" + line + "\n").toMatch(contradictory);
+});
+
+it("confines every cached-null phrase to the exact qualified statements", () => {
+  const unqualified = /\bcached\s+null\b/i;
+  for (const [book, qualifiedCount] of [[rotation, 2], [deploy, 1]] as const) {
+    const parts = book.split(cachedNull);
+    expect(parts).toHaveLength(qualifiedCount + 1);
+    expect(parts.join("")).not.toMatch(unqualified);
+    expect(parts.join("") + "\nThe request must query Snowflake rather than return a cached null.\n").toMatch(unqualified);
+  }
+});

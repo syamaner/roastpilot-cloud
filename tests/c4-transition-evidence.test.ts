@@ -329,3 +329,46 @@ it("requires exactly one alternate even when both alternates have complete obser
     })));
   })).toEqual(incomplete("recovery_unqualified"));
 });
+
+it("retains a legacy target in inventory and excludes it from rollback policy", () => {
+  const input = fixture();
+  const legacyTarget = ref(941);
+  addSubject(input, { id: legacyTarget, kind: "target", classification: "legacy", release: null });
+
+  expect(verify(input)).toEqual(complete);
+  record(input, "rollback_policy").members.push(legacyTarget);
+  expect(verify(input)).toEqual(rejected("coverage_mismatch"));
+});
+
+it("rejects reuse of the producer drain source by each serving observation kind", () => {
+  for (const [kind, endpoint] of [
+    ["page_nonservable", ids.legacyUrl],
+    ["preview_nonservable", ids.legacyUrl],
+    ["page_uncached", ids.currentUrl],
+    ["preview_uncached", ids.currentUrl],
+  ] as const) {
+    expect(edit((input) => {
+      record(input, kind, endpoint).source = record(input, "producer_drained", ids.legacyProducer).source;
+    }), kind).toEqual(rejected("evidence_reuse"));
+  }
+});
+
+it("requires a scope-exclusion claim for an out-of-scope producer", () => {
+  const input = fixture();
+  const producer = ref(942);
+  addSubject(input, { id: producer, kind: "producer", classification: "out_of_scope", release: null });
+  expect(verify(input)).toEqual(incomplete("missing_evidence"));
+
+  const claim = { ...record(input, "scope_exclusion", ids.excluded), id: ref(943), subject: producer, source: ref(944) };
+  input.observations.push(claim);
+  expect(verify(input)).toEqual(complete);
+
+  claim.kind = "producer_drained";
+  expect(verify(input)).toEqual(rejected("coverage_mismatch"));
+});
+
+it("keeps an unknown producer pending when the inventory discloses it", () => {
+  expect(edit((input) => {
+    addSubject(input, { id: ref(945), kind: "producer", classification: "unknown", release: null });
+  })).toEqual(incomplete("missing_evidence"));
+});
