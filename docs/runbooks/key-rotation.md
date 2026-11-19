@@ -155,9 +155,7 @@ The `ROASTPILOT_AGENT_CI` consumer is instead the `dev-snowflake-agent` GitHub
 Environment secret `SNOWFLAKE_AGENT_PRIVATE_KEY`, with optional
 `SNOWFLAKE_AGENT_PRIVATE_KEY_PASSPHRASE`. The gated
 `dev-snowflake-agent-verify.yml` workflow converts that secret to its temporary
-file input. Rotate this principal by updating the Environment secret as a
-GitHub operator, then re-dispatch the gated workflow and prove new-key
-authentication before unsetting the old slot. Do not copy the secret into a
+file input. Rotate this principal by updating the Environment secret as a GitHub operator. Verification for this consumer requires a separately qualified operator procedure. Keep the old slot until that verification succeeds. Do not copy the secret into a
 repository file.
 
 When installing an unencrypted `-nocrypt` replacement, explicitly delete the
@@ -191,12 +189,11 @@ fingerprint column spellings remain `[VERIFY-LIVE]` as described above.
    deployment. For a local agent, replace the file referenced by
    `SNOWFLAKE_PRIVATE_KEY_FILE` and restart the agent process. For
    `ROASTPILOT_AGENT_CI`, update `SNOWFLAKE_AGENT_PRIVATE_KEY` in the
-   `dev-snowflake-agent` GitHub Environment and re-dispatch its gated workflow.
+   `dev-snowflake-agent` GitHub Environment and follow the separately qualified verification procedure described under Verify.
 4. Before relying on an authentication probe, confirm that the exact consumer
    target was updated: the correct Vercel scope and a fresh deployment built
    with its new environment value, the configured local key-file path and a
-   restarted agent, or the correct GitHub Environment secret and a fresh gated
-   workflow dispatch. Then probe that target. Because both Snowflake keys are
+   restarted agent, or the correct GitHub Environment secret and the independently verified consumer binding under that procedure. If a qualified procedure or suitable evidence is unavailable, keep verification pending. Then probe that target. Because both Snowflake keys are
    valid at this point, a bare authentication success without this target
    confirmation is not proof of new-key uptake. Whether the target has picked
    up the new key is `[VERIFY-LIVE]`; credential or identity uncertainty fails
@@ -230,9 +227,8 @@ fingerprint column spellings remain `[VERIFY-LIVE]` as described above.
    Probe the deployment belonging to the rotated principal: Production for
    `ROASTPILOT_WEB_PROD`, or the specific authenticated Preview deployment for
    `ROASTPILOT_WEB`.
-   Do not reuse the pre-revocation slug or one used for another deployment; the
-   resulting 404 must perform a fresh Snowflake query rather than return a
-   cached null. This post-revocation probe is the final proof that the target
+   Do not reuse the pre-revocation slug or one used for another deployment.
+   The resulting 404 must perform a fresh Snowflake query. An ISR-era deployment may return a cached null for a previously requested valid slug. A request reaching the uncached reader makes a fresh server read. This post-revocation probe is the final proof that the target
    uses the new key. If it fails, restore the dual-key state by putting the
    escrowed old public-key body back into the now-empty `<old-key-slot>`, then
    diagnose the consumer:
@@ -256,10 +252,11 @@ Containment takes priority over zero downtime in this named exception.
 
 ## Verify
 
-The sanctioned `ROASTPILOT_AGENT_CI` verification path is a human-approved
-dispatch of `dev-snowflake-agent-verify.yml`. It supplies both the agent and
-seed secrets from the `dev-snowflake-agent` GitHub Environment and converts
-them to temporary files before running the verifier.
+The `dev-snowflake-agent-verify.yml` dispatch is a live operator action using both the agent and seed credentials.
+
+The gated workflow runs the live agent and seed principal guards first. Its first write verifier then refuses, and the shell stops before the presigned URL and telemetry commands.
+
+A principal guard outcome alone supplies no write acceptance. The retired workflow is not the rotation verification procedure. Keep verification pending until a separately qualified operator procedure supplies the required evidence.
 
 `upsert_roast_verify_live.py` is retired by C9-C2 and refuses; no replacement
 live write instrument exists until C9-C4. Do not provision or invoke a seed
@@ -286,8 +283,7 @@ vc curl '/r/<fresh-route-valid-base58-slug>' --deployment '<preview-deployment-u
 ```
 
 It must return the graceful 404 page, never 500. A placeholder such as
-`missing` can fail route validation before Snowflake is queried, and a
-previously requested valid slug can return a cached null for five minutes. The
+`missing` can fail route validation before Snowflake is queried. An ISR-era deployment may return a cached null for a previously requested valid slug. A request reaching the uncached reader makes a fresh server read. The
 fresh-slug 404 performs that deployment's Snowflake query and therefore proves
 that it authenticates with the rotated principal's key, uses the `PUBLIC_WEB`
 grants, and reaches Snowflake.
@@ -325,7 +321,7 @@ the live probe without exposing credential material.
 | Upload a web private key and redeploy | Orchestrator and operator, with the operator supplying the private key at the CLI |
 | Replace a local agent private-key file and restart | Agent operator |
 | Run the local agent live probe | Agent operator through `ROASTPILOT_AGENT` |
-| Update the `dev-snowflake-agent` Environment secret and dispatch the gated DEV CI probe | GitHub operator, human approver, and `ROASTPILOT_AGENT_CI` |
+| Update the `dev-snowflake-agent` Environment secret and verify under a separately qualified procedure | GitHub operator and authorised operator |
 | Run the web HTTP probes and genuine browser submission | Orchestrator against the redeployed target |
 | Remove plaintext working files after escrow | Operator |
 
